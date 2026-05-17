@@ -1,0 +1,71 @@
+logs:
+  path: "logs"
+api:
+  path: "data/bronze"
+  timeout: 30
+datasets:
+  - name: "SIAF"
+    full_name: "Presupuesto y Ejecución de Gasto"
+    type: "fs"
+    description: "El conjunto de datos publicado corresponde al conjunto de datos de la Consulta Amigable de Gasto disponible en el Portal de Transparencia Económica del MEF, y contiene la Información del Presupuesto Institucional de Apertura (PIA), Presupuesto Institucional Modificado (PIM), y la ejecución de gasto en las fases de Compromiso, Devengado y Girado correspondiente a las Unidades Ejecutoras (UEs) del Gobierno Nacional, los Gobiernos Regionales y las Municipalidades de los Gobiernos Locales, sobre la distribución y ejecución de los recursos públicos."
+    format: "csv"
+    save_format: "parquet"
+    url: "https://api.datosabiertos.mef.gob.pe/DatosAbiertos/v1/datastore_search"
+    dictionary:
+      - filename: "Ingresos_diccionario"
+        id: "9d38c7f5-95cc-4613-8737-28856e0f029b"
+    modules:
+      - name: "2021-Ingreso"
+      - name: "2022-Ingreso"
+      - name: "2023-Ingreso"
+      - name: "2024-Ingreso"
+      - name: "2025-Ingreso-Mensual"
+        type: "monthly"
+
+  - name: "SISMEPRE"
+    full_name: "Seguimiento de la Meta de Impuesto Predial"
+    type: "fs"
+    description: "Información cuantitativa y cualitativa que proveen las municipalidades participantes de la Meta de recaudación del impuesto predial, en el marco del cumplimiento del Programa de Incentivos para la Mejora de la Gestión Municipal, cuyo registro se realiza mediante el aplicativo web del Sistema de Registro Predial."
+    format: "csv"
+    save_format: "parquet"
+    url: "https://api.datosabiertos.mef.gob.pe/DatosAbiertos/v1/datastore_search"
+    modules:
+      - name: "rentas_preguntas"
+        dictionary:
+          - filename: "rentas_preguntas_diccionario"
+            id: "72019db9-35d5-4abb-8c6c-a6bac1d1792a"
+      - name: "rentas_estadistica"
+        dictionary:
+          - filename: "rentas_estadistica_diccionario"
+            id: "4e2257ee-4a6d-46ce-bca2-6d0d93165d24"
+      - name: "rentas_formulario"
+        dictionary:
+          - filename: "rentas_formulario_diccionario"
+            id: "66100448-c6c4-4919-a551-3d57a8e13b42"
+      - name: "rentas_esat_estadistica_atm"
+        dictionary:
+          - filename: "rentas_esat_estadistica_atm_diccionario"
+            id: "1fa788c6-3569-4405-8862-36efe3afbcd7"
+      - name: "rentas_respuestas"
+        dictionary:
+          - filename: "rentas_respuestas_diccionario"
+            id: "eb5f7a3e-6b54-4461-a361-cacee9991313"
+      - name: "rentas_ano_aplicacion"
+        dictionary:
+          - filename: "rentas_ano_aplicacion_diccionario"
+            id: "d71e1a4a-81b0-488d-beda-619ab44b279f"
+      - name: "rentas_entidad_estado"
+
+  - name: "RENAMU"
+    full_name: "Registro Nacional de Municipalidades"
+    type: "fs"
+    description: "Disponer de información estadística de las municipalidades provinciales, distritales y de centros poblados, a fin de generar indicadores municipales que sirvan de apoyo a la gestión regional y local para la planificación y la adecuada toma de decisiones."
+    format: "csv"
+    save_format: "parquet"
+    url: "https://www.inei.gob.pe/media/DATOS_ABIERTOS/RENAMU/DATA"
+    modules:
+      - name: "2021"
+      - name: "2022"
+      - name: "2023"
+      - name: "2024"
+      - name: "2025"

@@ -1,0 +1,3 @@
+# Instalación
+
+uv sync
