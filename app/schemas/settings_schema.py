@@ -12,6 +12,7 @@ class DatasetDictionary(BaseModel):
 class DatasetModule(BaseModel):
     name: str
     type: Literal["full", "monthly", "daily"] = "full"
+    path: Optional[str] = None
     id: Optional[str] = None
     dictionary: Optional[list[DatasetDictionary]] = None
 
@@ -37,7 +38,22 @@ class LogsConfig(BaseModel):
     path: str
 
 
+class SilverDatabaseConfig(BaseModel):
+    host: str
+    port: int
+    database: str
+    dbschema: str
+    user: str
+
+
+class SilverConfig(BaseModel):
+    path: str
+    profiling_path: str
+    database: SilverDatabaseConfig
+
+
 class Config(BaseModel):
+    silver: SilverConfig
     logs: LogsConfig
     api: ApiConfig
     datasets: list[Dataset]

@@ -6,17 +6,24 @@ from app.utils.logging import UnifiedLogger
 class BronzePipeline:
     def __init__(self):
         self.logger = UnifiedLogger("bronze_pipeline")
-        self.client = MefClient()
-        self.renamu_client = MefClient(
-            "https://www.datosabiertos.gob.pe/",
-            "https://www.inei.gob.pe/media/DATOS_ABIERTOS/RENAMU/DATA",
-        )
 
     def run(self):
+        self.logger.info("Iniciando Bronze Pipeline")
         for dataset in settings.config.datasets:
-            if dataset.name == "SIAF":
-                self.client.get_zip(dataset, use_schema="global")
-            elif dataset.name == "SISMEPRE":
-                self.client.get_zip(dataset, use_schema="individual")
-            elif dataset.name == "RENAMU":
-                self.renamu_client.get_zip(dataset, use_schema="individual")
+            self.logger.info(f"Descargando dataset: {dataset.name}")
+            client = MefClient(fs_url=dataset.url)
+            try:
+                if dataset.name == "SIAF":
+                    self.logger.info("Usando esquema global para SIAF")
+                    client.get_zip(dataset, use_schema="global")
+                elif dataset.name == "SISMEPRE":
+                    self.logger.info("Usando esquema individual para SISMEPRE")
+                    client.get_zip(dataset, use_schema="individual")
+                elif dataset.name == "RENAMU":
+                    self.logger.info("Usando esquema individual para RENAMU")
+                    client.get_zip(dataset, use_schema="individual")
+                self.logger.info(f"Dataset {dataset.name} descargado exitosamente")
+            except Exception as e:
+                self.logger.error(f"Error descargando dataset {dataset.name}: {e}", stack_trace=True)
+                raise
+        self.logger.info("Bronze Pipeline completado")
