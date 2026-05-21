@@ -761,7 +761,4 @@ export MSSQL_SA_PASSWORD="SecurePass123!"
 ## 🚀 Próximos Pasos (Roadmap)
 
 - [ ] **Capa Gold:** Vistas agregadas para ejecutivos
-- [ ] **Modelos ML:** Predicción de recaudación
 - [ ] **Dashboard:** Power BI / Tableau
-- [ ] **Alerts:** Monitoreo de calidad en tiempo real
-- [ ] **Dockerización:** Todo en un contenedor (App + Spark + JDBC)
