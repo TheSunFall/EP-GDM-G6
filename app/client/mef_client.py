@@ -6,12 +6,15 @@ import pyarrow as pa
 from app.client.base_client import BaseClient
 from app.schemas.settings_schema import Dataset, DatasetDictionary
 from app.settings.settings import settings
+from app.utils.logging import UnifiedLogger
 
 TYPES_MAP = {
     "Carácter": pa.string(),
     "Numérico": pa.float64(),
     "Fecha": pa.timestamp("s"),
 }
+
+_logger = UnifiedLogger("mef_client")
 
 
 class MefClient(BaseClient):
@@ -31,11 +34,13 @@ class MefClient(BaseClient):
         path: str | Path = Path(settings.config.api.path) / "dicts",
     ):
         """Downloads a data diccionary via the Datos Abiertos API"""
+        _logger.info(f"Descargando diccionario de datos: {definition.filename}")
         res = super().get(params={"resource_id": definition.id}, type="api")
 
         super().save(
             res, path, None, "file", f"{definition.filename}.parquet", "parquet"
         )
+        _logger.info(f"Diccionario de datos guardado: {definition.filename}")
         return res.json()
 
     def get_zip(
@@ -53,10 +58,13 @@ class MefClient(BaseClient):
             save_path: Path to save the downloaded data
         """
         if use_schema == "global" and datasets.dictionary:
+            _logger.info(f"Cargando diccionario global para {datasets.name}")
             data_dict = self.get_data_dict(datasets.dictionary[0])
 
         for module in datasets.modules:
+            _logger.info(f"Procesando módulo: {module.name}")
             if use_schema == "individual" and module.dictionary:
+                _logger.info(f"Descargando diccionario individual para {module.name}")
                 data_dict = self.get_data_dict(module.dictionary[0])
                 schema = (
                     pa.schema(
@@ -73,11 +81,13 @@ class MefClient(BaseClient):
                 )
             else:
                 schema = None
+            _logger.info(f"Descargando archivo: {module.name}.zip")
             super().save(
-                super().get(f"/{module.name}.zip", type=datasets.type),
+                super().get(f"{self.fs_url}/{module.name}.zip/", type=datasets.type),
                 save_path,
                 schema if schema is not None else None,
                 "zip",
                 f"{datasets.name}-{module.name}.parquet",
                 datasets.save_format,
             )
+            _logger.info(f"Módulo {module.name} guardado exitosamente")

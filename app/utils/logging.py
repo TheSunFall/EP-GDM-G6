@@ -10,6 +10,9 @@ class BaseLogger:
         self._logger = logging.getLogger(name)
         self._logger.setLevel(logging.INFO)
 
+    def debug(self, message: str):
+        self._logger.debug(message)
+
     def info(self, message: str):
         self._logger.info(message)
 
@@ -57,7 +60,7 @@ class FileLogger(BaseLogger):
         logging_path = logging_path / str(datetime.now().strftime("%d-%m-%Y"))
         logging_path.mkdir(exist_ok=True, parents=True)
         handler = logging.FileHandler(
-            logging_path / f"{datetime.now().strftime('%H:%M:%S %d-%m-%Y')}-{name}.log"
+            logging_path / f"{datetime.now().strftime('%H-%M-%S %d-%m-%Y')}-{name}.log"
         )
         handler.setFormatter(
             logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
@@ -77,6 +80,10 @@ class UnifiedLogger:
     def __init__(self, name: str, path: str | None = None):
         self.__console_logger = ConsoleLogger(name)
         self.__file_logger = FileLogger(name, path)
+
+    def debug(self, message: str):
+        self.__console_logger.debug(message)
+        self.__file_logger.debug(message)
 
     def info(self, message: str):
         self.__console_logger.info(message)

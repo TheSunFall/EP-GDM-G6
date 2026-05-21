@@ -1,3 +1,13 @@
+silver:
+  path: "data/silver"
+  profiling_path: "data/profiling"
+  database:
+    host: "localhost"
+    port: 11423
+    database: "DLKH_MEF"
+    dbschema: "silver"
+    user: "sa"
+
 logs:
   path: "logs"
 api:
@@ -10,7 +20,7 @@ datasets:
     description: "El conjunto de datos publicado corresponde al conjunto de datos de la Consulta Amigable de Gasto disponible en el Portal de Transparencia Económica del MEF, y contiene la Información del Presupuesto Institucional de Apertura (PIA), Presupuesto Institucional Modificado (PIM), y la ejecución de gasto en las fases de Compromiso, Devengado y Girado correspondiente a las Unidades Ejecutoras (UEs) del Gobierno Nacional, los Gobiernos Regionales y las Municipalidades de los Gobiernos Locales, sobre la distribución y ejecución de los recursos públicos."
     format: "csv"
     save_format: "parquet"
-    url: "https://api.datosabiertos.mef.gob.pe/DatosAbiertos/v1/datastore_search"
+    url: "https://fs.datosabiertos.mef.gob.pe/datastorefiles"
     dictionary:
       - filename: "Ingresos_diccionario"
         id: "9d38c7f5-95cc-4613-8737-28856e0f029b"
@@ -28,7 +38,7 @@ datasets:
     description: "Información cuantitativa y cualitativa que proveen las municipalidades participantes de la Meta de recaudación del impuesto predial, en el marco del cumplimiento del Programa de Incentivos para la Mejora de la Gestión Municipal, cuyo registro se realiza mediante el aplicativo web del Sistema de Registro Predial."
     format: "csv"
     save_format: "parquet"
-    url: "https://api.datosabiertos.mef.gob.pe/DatosAbiertos/v1/datastore_search"
+    url: "https://fs.datosabiertos.mef.gob.pe/datastorefiles"
     modules:
       - name: "rentas_preguntas"
         dictionary:
@@ -68,4 +78,13 @@ datasets:
       - name: "2022"
       - name: "2023"
       - name: "2024"
-      - name: "2025"
+
+  - name: "RENAMU"
+    full_name: "Registro Nacional de Municipalidades"
+    type: "fs"
+    description: "Disponer de información estadística de las municipalidades provinciales, distritales y de centros poblados, a fin de generar indicadores municipales que sirvan de apoyo a la gestión regional y local para la planificación y la adecuada toma de decisiones."
+    format: "csv"
+    save_format: "parquet"
+    url: "https://proyectos.inei.gob.pe/iinei/srienaho/descarga/CSV"
+    modules:
+      - name: "984-Modulo1963"
