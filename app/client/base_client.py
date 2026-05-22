@@ -10,7 +10,6 @@ import pyarrow as pa
 import pyarrow.csv as pv
 import pyarrow.parquet as pq
 
-from app.settings.settings import settings
 from app.utils.logging import UnifiedLogger
 
 _logger = UnifiedLogger("base_client")
@@ -74,7 +73,9 @@ class BaseClient:
         for attempt in range(1, max_attempts + 1):
             try:
                 if url.startswith("http://") or url.startswith("https://"):
-                    response = httpx.get(url, params=params, timeout=self.timeout, follow_redirects=True)
+                    response = httpx.get(
+                        url, params=params, timeout=self.timeout, follow_redirects=True
+                    )
                 elif type == "api":
                     response = self.client.get(url, params=params)
                 else:
@@ -92,7 +93,9 @@ class BaseClient:
                     )
                     time.sleep(wait_time)
                 else:
-                    _logger.error(f"Todos los intentos fallidos para {url}", stack_trace=True)
+                    _logger.error(
+                        f"Todos los intentos fallidos para {url}", stack_trace=True
+                    )
 
         raise last_error  # type: ignore[misc]
 

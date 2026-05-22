@@ -68,7 +68,7 @@ class FileLogger(BaseLogger):
         self._logger.addHandler(handler)
 
 
-class UnifiedLogger:
+class UnifiedLogger(BaseLogger):
     """
     Logger that outputs to console and logfile at the same time.
 
@@ -78,25 +78,23 @@ class UnifiedLogger:
     """
 
     def __init__(self, name: str, path: str | None = None):
-        self.__console_logger = ConsoleLogger(name)
-        self.__file_logger = FileLogger(name, path)
+        super().__init__(name)
 
-    def debug(self, message: str):
-        self.__console_logger.debug(message)
-        self.__file_logger.debug(message)
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(
+            logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+        )
+        self._logger.addHandler(console_handler)
 
-    def info(self, message: str):
-        self.__console_logger.info(message)
-        self.__file_logger.info(message)
+        logging_path = Path(path) if path else Path(settings.config.logs.path)
+        logging_path = logging_path / str(datetime.now().strftime("%d-%m-%Y"))
+        logging_path.mkdir(exist_ok=True, parents=True)
+        file_handler = logging.FileHandler(
+            logging_path / f"{datetime.now().strftime('%H-%M-%S %d-%m-%Y')}-{name}.log"
+        )
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+        )
+        self._logger.addHandler(file_handler)
 
-    def warning(self, message: str, stack_trace: bool = False):
-        self.__console_logger.warning(message, stack_trace=stack_trace)
-        self.__file_logger.warning(message, stack_trace=stack_trace)
-
-    def error(self, message: str, stack_trace: bool = False):
-        self.__console_logger.error(message, stack_trace=stack_trace)
-        self.__file_logger.error(message, stack_trace=stack_trace)
-
-    def critical(self, message: str, stack_trace: bool = True):
-        self.__console_logger.critical(message, stack_trace=stack_trace)
-        self.__file_logger.critical(message, stack_trace=stack_trace)
+        self._logger.propagate = False

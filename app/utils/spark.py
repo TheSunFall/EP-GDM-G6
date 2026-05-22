@@ -23,7 +23,9 @@ def _resolve_python_executable() -> str:
     """
     import sys
 
-    venv_python = Path(__file__).parent.parent.parent / ".venv" / "Scripts" / "python.exe"
+    venv_python = (
+        Path(__file__).parent.parent.parent / ".venv" / "Scripts" / "python.exe"
+    )
     if venv_python.exists():
         return str(venv_python)
     return sys.executable
@@ -41,9 +43,15 @@ class SparkClient:
             SparkSession.builder.appName("Analisis_Presupuesto_MEF")
             .config("spark.driver.memory", "4g")
             .config("spark.jars", mssql_jar)
-            .config("spark.jars.packages", "com.microsoft.sqlserver:mssql-jdbc:13.4.0.jre11")
-            .config("spark.driver.extraJavaOptions", f"-Djava.library.path={hadoop_bin}")
-            .config("spark.executor.extraJavaOptions", f"-Djava.library.path={hadoop_bin}")
+            .config(
+                "spark.jars.packages", "com.microsoft.sqlserver:mssql-jdbc:13.4.0.jre11"
+            )
+            .config(
+                "spark.driver.extraJavaOptions", f"-Djava.library.path={hadoop_bin}"
+            )
+            .config(
+                "spark.executor.extraJavaOptions", f"-Djava.library.path={hadoop_bin}"
+            )
             .config("spark.pyspark.python", python_exec)
             .getOrCreate()
         )

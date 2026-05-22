@@ -83,7 +83,7 @@ class MefClient(BaseClient):
                 schema = None
             _logger.info(f"Descargando archivo: {module.name}.zip")
             super().save(
-                super().get(f"{self.fs_url}/{module.name}.zip/", type=datasets.type),
+                super().get(f"{self.fs_url}/{module.name}.zip", type=datasets.type),
                 save_path,
                 schema if schema is not None else None,
                 "zip",
