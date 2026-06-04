@@ -8,7 +8,7 @@ from pyspark.sql import functions as F
 from app.settings.settings import settings
 from app.utils.logging import UnifiedLogger
 
-_logger = UnifiedLogger("silver_quality")
+_logger = UnifiedLogger("SilverQuality", "silver")
 
 # Rutas absolutas basadas en la raíz del proyecto
 _BRONZE = settings.project_root / settings.config.api.path
@@ -185,7 +185,7 @@ def fix_renamu(spark: SparkSession, year: str) -> DataFrame:
     return _log_count(f"renamu_{year}", df)
 
 
-def fix_renamu_984(spark: SparkSession) -> DataFrame | None:
+def fix_renamu_984(spark: SparkSession, year: str = "2025") -> DataFrame | None:
     path = _BRONZE / "RENAMU-984-Modulo1963.parquet"
     if not path.exists():
         _logger.warning(f"Archivo {path} no encontrado, se omite")
@@ -195,9 +195,10 @@ def fix_renamu_984(spark: SparkSession) -> DataFrame | None:
         df.withColumn("ccdd", _smallint_float("ccdd"))
         .withColumn("ccpp", _smallint_float("ccpp"))
         .withColumn("ccdi", _smallint_float("ccdi"))
+        .withColumn("Año", _year_float("Año"))
         .dropDuplicates()
     )
-    return _log_count("renamu_984_modulo1963", df)
+    return _log_count(f"renamu_{year}", df)
 
 
 # ── orquestador ────────────────────────────────────────────────────────────────
@@ -221,7 +222,7 @@ def fix_all(spark: SparkSession) -> dict[str, DataFrame | list[DataFrame]]:
 
     _logger.info("Procesando dataset SIAF - Ingreso")
     result["ingreso_unified"] = _save("ingreso_unified", fix_ingreso(spark))
-    
+
     _logger.info("Procesando dataset SISMEPRE")
     result["rentas_preguntas"] = _save("rentas_preguntas", fix_rentas_preguntas(spark))
     result["rentas_formulario"] = _save(
@@ -244,11 +245,11 @@ def fix_all(spark: SparkSession) -> dict[str, DataFrame | list[DataFrame]]:
         else:
             _logger.warning(f"RENAMU-{year}.parquet no encontrado, se omite")
 
-    result["renamu_dfs"] = renamu_dfs
-
     df_984 = fix_renamu_984(spark)
     if df_984 is not None:
-        _save("renamu_984_modulo1963", df_984)
+        _save("renamu_2025", df_984)
+        renamu_dfs.append(df_984)
+    result["renamu_dfs"] = renamu_dfs
     result["renamu_984"] = df_984
 
     _logger.info("Correcciones de calidad completadas para todos los datasets")

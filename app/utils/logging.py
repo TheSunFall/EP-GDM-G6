@@ -56,8 +56,9 @@ class FileLogger(BaseLogger):
 
     def __init__(self, name: str, path: str | None = None):
         super().__init__(name)
-        logging_path = Path(path) if path else Path(settings.config.logs.path)
-        logging_path = logging_path / str(datetime.now().strftime("%d-%m-%Y"))
+        base_path = Path(settings.config.logs.path) or "logs"
+        logging_path = base_path / str(datetime.now().strftime("%d-%m-%Y"))
+        logging_path = (logging_path / path) if path else logging_path
         logging_path.mkdir(exist_ok=True, parents=True)
         handler = logging.FileHandler(
             logging_path / f"{datetime.now().strftime('%H-%M-%S %d-%m-%Y')}-{name}.log"
@@ -86,8 +87,9 @@ class UnifiedLogger(BaseLogger):
         )
         self._logger.addHandler(console_handler)
 
-        logging_path = Path(path) if path else Path(settings.config.logs.path)
-        logging_path = logging_path / str(datetime.now().strftime("%d-%m-%Y"))
+        base_path = Path(settings.config.logs.path) or "logs"
+        logging_path = base_path / str(datetime.now().strftime("%d-%m-%Y"))
+        logging_path = (logging_path / path) if path else logging_path
         logging_path.mkdir(exist_ok=True, parents=True)
         file_handler = logging.FileHandler(
             logging_path / f"{datetime.now().strftime('%H-%M-%S %d-%m-%Y')}-{name}.log"

@@ -12,7 +12,7 @@ import pyarrow.parquet as pq
 
 from app.utils.logging import UnifiedLogger
 
-_logger = UnifiedLogger("base_client")
+_logger = UnifiedLogger("BaseClient", "base_client")
 
 
 class BaseClient:
@@ -138,7 +138,7 @@ class BaseClient:
                             encoding = "utf-8"
                         except UnicodeDecodeError:
                             sample = csv_file.read(4096).decode("cp1252")
-                            encoding = "cp1250"
+                            encoding = "cp1252"
                             _logger.info(f"Usando codificación cp1252 para {csv_name}")
 
                         delimiter = csv.Sniffer().sniff(sample).delimiter
@@ -162,6 +162,7 @@ class BaseClient:
                         )
                         table = pv.read_csv(
                             csv_file,
+                            read_options=read_opts,
                             parse_options=parse_opts,
                             convert_options=convert_opts,
                         )

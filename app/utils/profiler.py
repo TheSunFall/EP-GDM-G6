@@ -1,4 +1,5 @@
 """Data quality profiling — 8 criterios de calidad para archivos Parquet Bronze (PySpark)."""
+
 import html as _html
 import json
 import os
@@ -7,39 +8,75 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from app.utils.logging import UnifiedLogger
-from app.utils.spark import SparkClient
 from pyspark.sql import functions as F
 
-_logger = UnifiedLogger("profiler")
+from app.utils.logging import UnifiedLogger
+from app.utils.spark import SparkClient
+
+_logger = UnifiedLogger("Profiler", "profiler")
 
 PASS_THRESHOLD = 70.0
 _YEAR_RANGE = (2000, 2030)
 
-_ID_PATTERNS          = re.compile(r"(id|codigo|ubigeo|sec_ejec|ccdd|ccpp|ccdi)", re.IGNORECASE)
-_NUMERIC_COL_PATTERNS = re.compile(r"(monto|pia|pim|recaudado|importe|saldo|anio|año|ano|mes|codigo|cod|sec|rubro|pliego|sector)", re.IGNORECASE)
-_AMOUNT_COL_PATTERNS  = re.compile(r"(monto|pia|pim|recaudado|importe|saldo)", re.IGNORECASE)
-_YEAR_COL_PATTERNS    = re.compile(r"(anio|año|ano|year)", re.IGNORECASE)
-_CODE_COL_PATTERNS    = re.compile(r"(codigo|cod|rubro|pliego|sector|tipo)", re.IGNORECASE)
+_ID_PATTERNS = re.compile(r"(id|codigo|ubigeo|sec_ejec|ccdd|ccpp|ccdi)", re.IGNORECASE)
+_NUMERIC_COL_PATTERNS = re.compile(
+    r"(monto|pia|pim|recaudado|importe|saldo|anio|año|ano|mes|codigo|cod|sec|rubro|pliego|sector)",
+    re.IGNORECASE,
+)
+_AMOUNT_COL_PATTERNS = re.compile(
+    r"(monto|pia|pim|recaudado|importe|saldo)", re.IGNORECASE
+)
+_YEAR_COL_PATTERNS = re.compile(r"(anio|año|ano|year)", re.IGNORECASE)
+_CODE_COL_PATTERNS = re.compile(r"(codigo|cod|rubro|pliego|sector|tipo)", re.IGNORECASE)
 
 _YEAR_LITERAL_RE = r"^(19|20)\d{2}($|-)"
-_UBIGEO_RE       = r"^\d{1,6}$"
-_NUMERIC_RE      = r"^-?\d+([.,]\d+)?$"
+_UBIGEO_RE = r"^\d{1,6}$"
+_NUMERIC_RE = r"^-?\d+([.,]\d+)?$"
 
 _CRITERION_META: Dict[str, Dict[str, str]] = {
-    "exactitud":     {"nombre": "Exactitud",                "desc": "Valores sin outliers estadísticos extremos (±3σ de la media)"},
-    "completitud":   {"nombre": "Completitud",              "desc": "Porcentaje de valores no nulos en todas las columnas del dataset"},
-    "consistencia":  {"nombre": "Consistencia",             "desc": "Coherencia interna entre columnas relacionadas (años 4 dígitos, pares ccdd-ccpp)"},
-    "integridad":    {"nombre": "Integridad",               "desc": "Columnas identificadoras y llaves primarias sin valores nulos"},
-    "razonabilidad": {"nombre": "Razonabilidad",            "desc": "Valores razonables para el dominio fiscal: montos ≥ 0, códigos no vacíos"},
-    "oportunidad":   {"nombre": "Oportunidad",              "desc": "Datos temporalmente válidos: años en rango esperado [2000–2030]"},
-    "unicidad":      {"nombre": "Unicidad / Deduplicación", "desc": "Porcentaje de filas únicas; detecta filas completamente duplicadas"},
-    "validez":       {"nombre": "Validez",                  "desc": "Formatos correctos: numérico, ubigeo (1-6 dígitos), año (4 dígitos)"},
+    "exactitud": {
+        "nombre": "Exactitud",
+        "desc": "Valores sin outliers estadísticos extremos (±3σ de la media)",
+    },
+    "completitud": {
+        "nombre": "Completitud",
+        "desc": "Porcentaje de valores no nulos en todas las columnas del dataset",
+    },
+    "consistencia": {
+        "nombre": "Consistencia",
+        "desc": "Coherencia interna entre columnas relacionadas (años 4 dígitos, pares ccdd-ccpp)",
+    },
+    "integridad": {
+        "nombre": "Integridad",
+        "desc": "Columnas identificadoras y llaves primarias sin valores nulos",
+    },
+    "razonabilidad": {
+        "nombre": "Razonabilidad",
+        "desc": "Valores razonables para el dominio fiscal: montos ≥ 0, códigos no vacíos",
+    },
+    "oportunidad": {
+        "nombre": "Oportunidad",
+        "desc": "Datos temporalmente válidos: años en rango esperado [2000–2030]",
+    },
+    "unicidad": {
+        "nombre": "Unicidad / Deduplicación",
+        "desc": "Porcentaje de filas únicas; detecta filas completamente duplicadas",
+    },
+    "validez": {
+        "nombre": "Validez",
+        "desc": "Formatos correctos: numérico, ubigeo (1-6 dígitos), año (4 dígitos)",
+    },
 }
 
 _CRITERIA_ORDER = [
-    "exactitud", "completitud", "consistencia", "integridad",
-    "razonabilidad", "oportunidad", "unicidad", "validez",
+    "exactitud",
+    "completitud",
+    "consistencia",
+    "integridad",
+    "razonabilidad",
+    "oportunidad",
+    "unicidad",
+    "validez",
 ]
 
 spark_client = SparkClient()
@@ -48,11 +85,16 @@ spark = spark_client.get_session()
 
 # ── 8 Criterios ───────────────────────────────────────────────────────────────
 
+
 def _score_exactitud(df, cols: List[str]) -> Dict[str, Any]:
     target = [c for c in cols if _NUMERIC_COL_PATTERNS.search(c)][:10]
     if not target:
-        return {"score": 100.0, "observado": "Sin columnas numéricas para evaluar exactitud",
-                "columnas_evaluadas": 0, "outliers_detectados": []}
+        return {
+            "score": 100.0,
+            "observado": "Sin columnas numéricas para evaluar exactitud",
+            "columnas_evaluadas": 0,
+            "outliers_detectados": [],
+        }
 
     col_scores: Dict[str, float] = {}
     outlier_details: List[Dict] = []
@@ -73,11 +115,22 @@ def _score_exactitud(df, cols: List[str]) -> Dict[str, Any]:
         score = round(inliers / cnt * 100, 2)
         col_scores[col_name] = score
         if outliers > 0:
-            outlier_details.append({"columna": col_name, "outliers": outliers, "total": cnt, "score": score})
+            outlier_details.append(
+                {
+                    "columna": col_name,
+                    "outliers": outliers,
+                    "total": cnt,
+                    "score": score,
+                }
+            )
 
     if not col_scores:
-        return {"score": 100.0, "observado": "Sin columnas numéricas válidas",
-                "columnas_evaluadas": 0, "outliers_detectados": []}
+        return {
+            "score": 100.0,
+            "observado": "Sin columnas numéricas válidas",
+            "columnas_evaluadas": 0,
+            "outliers_detectados": [],
+        }
 
     avg = sum(col_scores.values()) / len(col_scores)
     aprobadas = sum(1 for s in col_scores.values() if s >= PASS_THRESHOLD)
@@ -92,20 +145,33 @@ def _score_exactitud(df, cols: List[str]) -> Dict[str, Any]:
     }
 
 
-_OPTIONAL_NULL_THRESHOLD = 0.85  # columnas con >85% nulls son opcionales y no penalizan el score
+_OPTIONAL_NULL_THRESHOLD = (
+    0.85  # columnas con >85% nulls son opcionales y no penalizan el score
+)
 
 
 def _score_completitud(df, cols: List[str], total: int) -> Dict[str, Any]:
     if total == 0:
-        return {"score": 0.0, "observado": "DataFrame vacío", "total_celdas": 0,
-                "total_nulas": 0, "peores_columnas": []}
+        return {
+            "score": 0.0,
+            "observado": "DataFrame vacío",
+            "total_celdas": 0,
+            "total_nulas": 0,
+            "peores_columnas": [],
+        }
 
-    null_row = df.select([F.count(F.when(F.col(c).isNull(), 1)).alias(c) for c in cols]).collect()[0]
+    null_row = df.select(
+        [F.count(F.when(F.col(c).isNull(), 1)).alias(c) for c in cols]
+    ).collect()[0]
     null_counts = {c: (null_row[c] or 0) for c in cols}
 
     # Separar columnas requeridas (≤85% nulos) de opcionales (>85% nulos — encuestas RENAMU, etc.)
-    required_cols = [c for c in cols if null_counts[c] / total <= _OPTIONAL_NULL_THRESHOLD]
-    optional_cols = [c for c in cols if null_counts[c] / total > _OPTIONAL_NULL_THRESHOLD]
+    required_cols = [
+        c for c in cols if null_counts[c] / total <= _OPTIONAL_NULL_THRESHOLD
+    ]
+    optional_cols = [
+        c for c in cols if null_counts[c] / total > _OPTIONAL_NULL_THRESHOLD
+    ]
 
     scoring_cols = required_cols if required_cols else cols
     total_cells = total * len(scoring_cols)
@@ -115,10 +181,11 @@ def _score_completitud(df, cols: List[str], total: int) -> Dict[str, Any]:
 
     worst = sorted(
         [(c, null_counts[c] / total * 100) for c in scoring_cols if null_counts[c] > 0],
-        key=lambda x: x[1], reverse=True,
+        key=lambda x: x[1],
+        reverse=True,
     )[:7]
     aprobadas = sum(1 for c in scoring_cols if null_counts[c] / total * 100 <= 30)
-    obs = (f"{total_nulls_req:,} nulos de {total_cells:,} celdas requeridas ({avg_null:.1f}% nulidad)")
+    obs = f"{total_nulls_req:,} nulos de {total_cells:,} celdas requeridas ({avg_null:.1f}% nulidad)"
     if optional_cols:
         obs += f" | {len(optional_cols)} columnas opcionales excluidas del score"
     return {
@@ -146,11 +213,18 @@ def _score_consistencia(df, cols: List[str], total: int) -> Dict[str, Any]:
         if non_null == 0:
             continue
         valid = df.filter(
-            F.expr(f"cast(`{col_name}` as string) rlike '^(19|20)\\\\d{{2}}' or try_cast(substr(cast(`{col_name}` as string), 1, 4) as int) between 1900 and 2100")
+            F.expr(
+                f"cast(`{col_name}` as string) rlike '^(19|20)\\\\d{{2}}' or try_cast(substr(cast(`{col_name}` as string), 1, 4) as int) between 1900 and 2100"
+            )
         ).count()
-        checks.append({"verificacion": f"Año 4 dígitos en '{col_name}'",
-                       "aprobadas": valid, "total": non_null,
-                       "score": round(valid / non_null * 100, 2)})
+        checks.append(
+            {
+                "verificacion": f"Año 4 dígitos en '{col_name}'",
+                "aprobadas": valid,
+                "total": non_null,
+                "score": round(valid / non_null * 100, 2),
+            }
+        )
 
     for code_col, lo, hi in (("ccdd", 1, 25), ("ccpp", 1, 99), ("ccdi", 1, 99)):
         if code_col not in cols_lower:
@@ -160,15 +234,25 @@ def _score_consistencia(df, cols: List[str], total: int) -> Dict[str, Any]:
         if non_null == 0:
             continue
         ok = df.filter(
-            F.expr(f"try_cast(substr(`{actual}`, 1, 4) as int) >= {lo} and try_cast(substr(`{actual}`, 1, 4) as int) <= {hi}")
+            F.expr(
+                f"try_cast(substr(`{actual}`, 1, 4) as int) >= {lo} and try_cast(substr(`{actual}`, 1, 4) as int) <= {hi}"
+            )
         ).count()
-        checks.append({"verificacion": f"Código '{code_col}' válido (rango {lo}-{hi})",
-                       "aprobadas": ok, "total": non_null,
-                       "score": round(ok / non_null * 100, 2)})
+        checks.append(
+            {
+                "verificacion": f"Código '{code_col}' válido (rango {lo}-{hi})",
+                "aprobadas": ok,
+                "total": non_null,
+                "score": round(ok / non_null * 100, 2),
+            }
+        )
 
     if not checks:
-        return {"score": 100.0, "observado": "Sin columnas sujetas a verificación de consistencia",
-                "detalle": []}
+        return {
+            "score": 100.0,
+            "observado": "Sin columnas sujetas a verificación de consistencia",
+            "detalle": [],
+        }
     avg = sum(c["score"] for c in checks) / len(checks)
     aprobadas = sum(1 for c in checks if c["score"] >= PASS_THRESHOLD)
     return {
@@ -183,16 +267,24 @@ def _score_consistencia(df, cols: List[str], total: int) -> Dict[str, Any]:
 def _score_integridad(df, cols: List[str], total: int) -> Dict[str, Any]:
     id_cols = [c for c in cols if _ID_PATTERNS.search(c)]
     if not id_cols:
-        return {"score": 100.0, "observado": "Sin columnas identificadoras detectadas", "detalle": []}
+        return {
+            "score": 100.0,
+            "observado": "Sin columnas identificadoras detectadas",
+            "detalle": [],
+        }
     if total == 0:
         return {"score": 0.0, "observado": "DataFrame vacío", "detalle": []}
 
-    null_row = df.select([F.count(F.when(F.col(c).isNull(), 1)).alias(c) for c in id_cols]).collect()[0]
+    null_row = df.select(
+        [F.count(F.when(F.col(c).isNull(), 1)).alias(c) for c in id_cols]
+    ).collect()[0]
     col_results = []
     for col_name in id_cols:
         nulos = null_row[col_name] or 0
         s = round((total - nulos) / total * 100, 2)
-        col_results.append({"columna": col_name, "nulos": nulos, "total": total, "score": s})
+        col_results.append(
+            {"columna": col_name, "nulos": nulos, "total": total, "score": s}
+        )
 
     avg = sum(c["score"] for c in col_results) / len(col_results)
     aprobadas = sum(1 for c in col_results if c["score"] >= PASS_THRESHOLD)
@@ -213,10 +305,15 @@ def _score_razonabilidad(df, cols: List[str], total: int) -> Dict[str, Any]:
         if non_null == 0:
             continue
         neg = df.filter(F.expr(f"try_cast(`{col_name}` as double) < 0")).count()
-        checks.append({"verificacion": f"Monto ≥ 0 en '{col_name}'",
-                       "aprobadas": non_null - neg, "total": non_null,
-                       "problemas": neg,
-                       "score": round((non_null - neg) / non_null * 100, 2)})
+        checks.append(
+            {
+                "verificacion": f"Monto ≥ 0 en '{col_name}'",
+                "aprobadas": non_null - neg,
+                "total": non_null,
+                "problemas": neg,
+                "score": round((non_null - neg) / non_null * 100, 2),
+            }
+        )
 
     for col_name in [c for c in cols if _CODE_COL_PATTERNS.search(c)][:8]:
         non_null = df.filter(F.col(col_name).isNotNull()).count()
@@ -224,26 +321,41 @@ def _score_razonabilidad(df, cols: List[str], total: int) -> Dict[str, Any]:
             continue
         blanks = df.filter(F.trim(F.col(col_name).cast("string")) == "").count()
         if blanks > 0:
-            checks.append({"verificacion": f"Código no vacío en '{col_name}'",
-                           "aprobadas": non_null - blanks, "total": non_null,
-                           "problemas": blanks,
-                           "score": round((non_null - blanks) / non_null * 100, 2)})
+            checks.append(
+                {
+                    "verificacion": f"Código no vacío en '{col_name}'",
+                    "aprobadas": non_null - blanks,
+                    "total": non_null,
+                    "problemas": blanks,
+                    "score": round((non_null - blanks) / non_null * 100, 2),
+                }
+            )
 
     for col_name in [c for c in cols if _YEAR_COL_PATTERNS.search(c)]:
         non_null = df.filter(F.col(col_name).isNotNull()).count()
         if non_null == 0:
             continue
         valid = df.filter(
-            F.expr(f"try_cast(substr(`{col_name}`, 1, 4) as int) >= 2000 and try_cast(substr(`{col_name}`, 1, 4) as int) <= 2030")
+            F.expr(
+                f"try_cast(substr(`{col_name}`, 1, 4) as int) >= 2000 and try_cast(substr(`{col_name}`, 1, 4) as int) <= 2030"
+            )
         ).count()
-        checks.append({"verificacion": f"Año razonable [2000-2030] en '{col_name}'",
-                       "aprobadas": valid, "total": non_null,
-                       "problemas": non_null - valid,
-                       "score": round(valid / non_null * 100, 2)})
+        checks.append(
+            {
+                "verificacion": f"Año razonable [2000-2030] en '{col_name}'",
+                "aprobadas": valid,
+                "total": non_null,
+                "problemas": non_null - valid,
+                "score": round(valid / non_null * 100, 2),
+            }
+        )
 
     if not checks:
-        return {"score": 100.0, "observado": "Sin columnas de dominio fiscal para razonabilidad",
-                "detalle": []}
+        return {
+            "score": 100.0,
+            "observado": "Sin columnas de dominio fiscal para razonabilidad",
+            "detalle": [],
+        }
     avg = sum(c["score"] for c in checks) / len(checks)
     aprobadas = sum(1 for c in checks if c["score"] >= PASS_THRESHOLD)
     return {
@@ -258,8 +370,11 @@ def _score_razonabilidad(df, cols: List[str], total: int) -> Dict[str, Any]:
 def _score_oportunidad(df, cols: List[str]) -> Dict[str, Any]:
     year_cols = [c for c in cols if _YEAR_COL_PATTERNS.search(c)]
     if not year_cols:
-        return {"score": 100.0, "observado": "Sin columnas de tiempo para evaluar oportunidad",
-                "detalle": []}
+        return {
+            "score": 100.0,
+            "observado": "Sin columnas de tiempo para evaluar oportunidad",
+            "detalle": [],
+        }
 
     col_results = []
     for col_name in year_cols:
@@ -267,23 +382,41 @@ def _score_oportunidad(df, cols: List[str]) -> Dict[str, Any]:
         if non_null == 0:
             continue
         valid = df.filter(
-            F.expr(f"try_cast(substr(`{col_name}`, 1, 4) as int) >= {_YEAR_RANGE[0]} and try_cast(substr(`{col_name}`, 1, 4) as int) <= {_YEAR_RANGE[1]}")
+            F.expr(
+                f"try_cast(substr(`{col_name}`, 1, 4) as int) >= {_YEAR_RANGE[0]} and try_cast(substr(`{col_name}`, 1, 4) as int) <= {_YEAR_RANGE[1]}"
+            )
         ).count()
         fuera_rows = (
             df.filter(
-                F.col(col_name).isNotNull() & (
-                    F.expr(f"(try_cast(substr(`{col_name}`, 1, 4) as int) < {_YEAR_RANGE[0]} or try_cast(substr(`{col_name}`, 1, 4) as int) > {_YEAR_RANGE[1]})")
+                F.col(col_name).isNotNull()
+                & (
+                    F.expr(
+                        f"(try_cast(substr(`{col_name}`, 1, 4) as int) < {_YEAR_RANGE[0]} or try_cast(substr(`{col_name}`, 1, 4) as int) > {_YEAR_RANGE[1]})"
+                    )
                 )
             )
-            .select(col_name).distinct().limit(5).collect()
+            .select(col_name)
+            .distinct()
+            .limit(5)
+            .collect()
         )
         fuera = sorted({str(r[col_name]) for r in fuera_rows if r[col_name]})
-        col_results.append({"columna": col_name, "validos": valid, "total": non_null,
-                            "score": round(valid / non_null * 100, 2),
-                            "fuera_rango": fuera[:5]})
+        col_results.append(
+            {
+                "columna": col_name,
+                "validos": valid,
+                "total": non_null,
+                "score": round(valid / non_null * 100, 2),
+                "fuera_rango": fuera[:5],
+            }
+        )
 
     if not col_results:
-        return {"score": 100.0, "observado": "Sin datos en columnas de tiempo", "detalle": []}
+        return {
+            "score": 100.0,
+            "observado": "Sin datos en columnas de tiempo",
+            "detalle": [],
+        }
     avg = sum(c["score"] for c in col_results) / len(col_results)
     aprobadas = sum(1 for c in col_results if c["score"] >= PASS_THRESHOLD)
     return {
@@ -297,8 +430,12 @@ def _score_oportunidad(df, cols: List[str]) -> Dict[str, Any]:
 
 def _score_unicidad(df, total: int) -> Dict[str, Any]:
     if total == 0:
-        return {"score": 100.0, "observado": "DataFrame vacío", "total_filas": 0,
-                "filas_duplicadas": 0}
+        return {
+            "score": 100.0,
+            "observado": "DataFrame vacío",
+            "total_filas": 0,
+            "filas_duplicadas": 0,
+        }
     unique = df.distinct().count()
     dups = total - unique
     score = round(unique / total * 100, 2)
@@ -320,33 +457,59 @@ def _score_validez(df, cols: List[str]) -> Dict[str, Any]:
         non_null = df.filter(F.col(col_name).isNotNull()).count()
         if non_null == 0:
             continue
-        parsed = df.filter(F.expr(f"try_cast(`{col_name}` as double) is not null")).count()
-        checks.append({"columna": col_name, "formato": "Numérico",
-                       "aprobadas": parsed, "total": non_null,
-                       "score": round(parsed / non_null * 100, 2)})
+        parsed = df.filter(
+            F.expr(f"try_cast(`{col_name}` as double) is not null")
+        ).count()
+        checks.append(
+            {
+                "columna": col_name,
+                "formato": "Numérico",
+                "aprobadas": parsed,
+                "total": non_null,
+                "score": round(parsed / non_null * 100, 2),
+            }
+        )
 
     for col_name in [c for c in cols if "ubigeo" in c.lower()]:
         non_null = df.filter(F.col(col_name).isNotNull()).count()
         if non_null == 0:
             continue
         ok = df.filter(F.col(col_name).cast("string").rlike(_UBIGEO_RE)).count()
-        checks.append({"columna": col_name, "formato": "Ubigeo (1-6 dígitos)",
-                       "aprobadas": ok, "total": non_null,
-                       "score": round(ok / non_null * 100, 2)})
+        checks.append(
+            {
+                "columna": col_name,
+                "formato": "Ubigeo (1-6 dígitos)",
+                "aprobadas": ok,
+                "total": non_null,
+                "score": round(ok / non_null * 100, 2),
+            }
+        )
 
     for col_name in [c for c in cols if _YEAR_COL_PATTERNS.search(c)]:
         non_null = df.filter(F.col(col_name).isNotNull()).count()
         if non_null == 0:
             continue
         ok = df.filter(
-            F.expr(f"cast(`{col_name}` as string) rlike '^(19|20)\\\\d{{2}}' or try_cast(substr(cast(`{col_name}` as string), 1, 4) as int) between 1900 and 2100")
+            F.expr(
+                f"cast(`{col_name}` as string) rlike '^(19|20)\\\\d{{2}}' or try_cast(substr(cast(`{col_name}` as string), 1, 4) as int) between 1900 and 2100"
+            )
         ).count()
-        checks.append({"columna": col_name, "formato": "Año (4 dígitos)",
-                       "aprobadas": ok, "total": non_null,
-                       "score": round(ok / non_null * 100, 2)})
+        checks.append(
+            {
+                "columna": col_name,
+                "formato": "Año (4 dígitos)",
+                "aprobadas": ok,
+                "total": non_null,
+                "score": round(ok / non_null * 100, 2),
+            }
+        )
 
     if not checks:
-        return {"score": 100.0, "observado": "Sin columnas con formato verificable", "detalle": []}
+        return {
+            "score": 100.0,
+            "observado": "Sin columnas con formato verificable",
+            "detalle": [],
+        }
     avg = sum(c["score"] for c in checks) / len(checks)
     aprobadas = sum(1 for c in checks if c["score"] >= PASS_THRESHOLD)
     return {
@@ -360,11 +523,16 @@ def _score_validez(df, cols: List[str]) -> Dict[str, Any]:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+
 def _find_parquet_units(root: Path) -> List[Path]:
     """Return .parquet files and .parquet directories, skipping part-files inside PySpark dirs."""
     units = []
     for item in root.rglob("*.parquet"):
-        if any(p.suffix == ".parquet" and p.is_dir() for p in item.parents if p != root and p.is_relative_to(root)):
+        if any(
+            p.suffix == ".parquet" and p.is_dir()
+            for p in item.parents
+            if p != root and p.is_relative_to(root)
+        ):
             continue
         units.append(item)
     return sorted(units)
@@ -389,14 +557,14 @@ def profile_parquet(parquet_path: Path) -> Dict[str, Any]:
     }
 
     runners = {
-        "exactitud":     lambda: _score_exactitud(df, cols),
-        "completitud":   lambda: _score_completitud(df, cols, total),
-        "consistencia":  lambda: _score_consistencia(df, cols, total),
-        "integridad":    lambda: _score_integridad(df, cols, total),
+        "exactitud": lambda: _score_exactitud(df, cols),
+        "completitud": lambda: _score_completitud(df, cols, total),
+        "consistencia": lambda: _score_consistencia(df, cols, total),
+        "integridad": lambda: _score_integridad(df, cols, total),
         "razonabilidad": lambda: _score_razonabilidad(df, cols, total),
-        "oportunidad":   lambda: _score_oportunidad(df, cols),
-        "unicidad":      lambda: _score_unicidad(df, total),
-        "validez":       lambda: _score_validez(df, cols),
+        "oportunidad": lambda: _score_oportunidad(df, cols),
+        "unicidad": lambda: _score_unicidad(df, total),
+        "validez": lambda: _score_validez(df, cols),
     }
 
     scores = []
@@ -407,16 +575,23 @@ def profile_parquet(parquet_path: Path) -> Dict[str, Any]:
             scores.append(outcome["score"])
             _logger.debug(f"Criterio {name}: {outcome['score']}%")
         except Exception as exc:
-            results["criteria"][name] = {"score": 0.0, "observado": f"Error al evaluar: {exc}",
-                                         "error": str(exc)}
+            results["criteria"][name] = {
+                "score": 0.0,
+                "observado": f"Error al evaluar: {exc}",
+                "error": str(exc),
+            }
             scores.append(0.0)
-            _logger.warning(f"Error evaluando criterio {name} para {parquet_path.name}: {exc}")
+            _logger.warning(
+                f"Error evaluando criterio {name} para {parquet_path.name}: {exc}"
+            )
 
     results["overall_score"] = round(sum(scores) / len(scores), 2) if scores else 0.0
     results["passed"] = results["overall_score"] >= PASS_THRESHOLD
 
     status = "APROBADO" if results["passed"] else "REPROBADO"
-    _logger.info(f"Archivo {parquet_path.name}: Score {results['overall_score']}% - {status}")
+    _logger.info(
+        f"Archivo {parquet_path.name}: Score {results['overall_score']}% - {status}"
+    )
 
     return results
 
@@ -439,45 +614,63 @@ def profile_directory(parquet_root: Path, report_dir: Path) -> List[Dict[str, An
     summary = {
         "profiled_at": datetime.now().isoformat(),
         "files_profiled": len(all_reports),
-        "overall_avg_score": round(sum(r["overall_score"] for r in all_reports) / len(all_reports), 2)
-        if all_reports else 0.0,
+        "overall_avg_score": round(
+            sum(r["overall_score"] for r in all_reports) / len(all_reports), 2
+        )
+        if all_reports
+        else 0.0,
         "files_passed": sum(1 for r in all_reports if r.get("passed")),
         "files_failed": sum(1 for r in all_reports if not r.get("passed")),
         "file_summaries": [
-            {"file": r["file"], "rows": r["rows"], "columns": r["columns"],
-             "overall_score": r["overall_score"], "passed": r["passed"],
-             "criteria_scores": {k: v["score"] for k, v in r["criteria"].items()}}
+            {
+                "file": r["file"],
+                "rows": r["rows"],
+                "columns": r["columns"],
+                "overall_score": r["overall_score"],
+                "passed": r["passed"],
+                "criteria_scores": {k: v["score"] for k, v in r["criteria"].items()},
+            }
             for r in all_reports
         ],
     }
 
     with open(report_dir / "profiling_summary.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
-    _logger.info(f"Resumen de perfilado guardado: {report_dir / 'profiling_summary.json'}")
+    _logger.info(
+        f"Resumen de perfilado guardado: {report_dir / 'profiling_summary.json'}"
+    )
 
     _write_html_report(summary, all_reports, report_dir / "profiling_summary.html")
     _logger.info(f"Reporte HTML generado: {report_dir / 'profiling_summary.html'}")
 
-    _logger.info(f"Perfilado de directorio completado: {len(all_reports)} archivos procesados")
+    _logger.info(
+        f"Perfilado de directorio completado: {len(all_reports)} archivos procesados"
+    )
     return all_reports
 
 
 # ── HTML Report ───────────────────────────────────────────────────────────────
+
 
 def _e(v: Any) -> str:
     return _html.escape(str(v))
 
 
 def _score_color(score: float) -> str:
-    if score >= 80: return "#198754"
-    if score >= PASS_THRESHOLD: return "#5cb85c"
-    if score >= 50: return "#ca8a00"
+    if score >= 80:
+        return "#198754"
+    if score >= PASS_THRESHOLD:
+        return "#5cb85c"
+    if score >= 50:
+        return "#ca8a00"
     return "#dc3545"
 
 
 def _fill_cls(score: float) -> str:
-    if score >= PASS_THRESHOLD: return "fill-green"
-    if score >= 50: return "fill-yellow"
+    if score >= PASS_THRESHOLD:
+        return "fill-green"
+    if score >= 50:
+        return "fill-yellow"
     return "fill-red"
 
 
@@ -490,8 +683,10 @@ def _badge_status(passed: bool) -> str:
 def _score_cell(score: float) -> str:
     color = _score_color(score)
     fill = _fill_cls(score)
-    return (f'<div class="score-cell" style="color:{color};font-weight:700">{score:.1f}%'
-            f'<div class="progress-mini"><div class="progress-fill {fill}" style="width:{min(score,100):.0f}%"></div></div></div>')
+    return (
+        f'<div class="score-cell" style="color:{color};font-weight:700">{score:.1f}%'
+        f'<div class="progress-mini"><div class="progress-fill {fill}" style="width:{min(score, 100):.0f}%"></div></div></div>'
+    )
 
 
 def _crit_detail_table(data: Dict[str, Any], key: str) -> str:
@@ -505,10 +700,12 @@ def _crit_detail_table(data: Dict[str, Any], key: str) -> str:
         header += "<th>Score</th>"
     body = ""
     for row in rows:
-        cells = "".join(f"<td>{_e(row.get(c,''))}</td>" for c in cols)
+        cells = "".join(f"<td>{_e(row.get(c, ''))}</td>" for c in cols)
         if score_present:
             s = row.get("score", 0)
-            cells += f'<td style="color:{_score_color(s)};font-weight:600">{s:.1f}%</td>'
+            cells += (
+                f'<td style="color:{_score_color(s)};font-weight:600">{s:.1f}%</td>'
+            )
         body += f"<tr>{cells}</tr>"
     return f'<table class="detail-table"><thead><tr>{header}</tr></thead><tbody>{body}</tbody></table>'
 
@@ -541,32 +738,38 @@ def _render_criterion_card(key: str, data: Dict[str, Any]) -> str:
 
     stats_html = ""
     if aprobadas != "—" or reprobadas != "—":
-        stats_html = (f'<div class="crit-stats">'
-                      f'<span>Aprobados: <b>{aprobadas}</b></span>'
-                      f'<span>Reprobados: <b>{reprobadas}</b></span>'
-                      f'</div>')
+        stats_html = (
+            f'<div class="crit-stats">'
+            f"<span>Aprobados: <b>{aprobadas}</b></span>"
+            f"<span>Reprobados: <b>{reprobadas}</b></span>"
+            f"</div>"
+        )
 
     return f"""
 <div class="crit-card">
   <div class="crit-top">
     <div>
-      <div class="crit-name">{_e(meta['nombre'])}</div>
-      <div class="crit-desc">{_e(meta['desc'])}</div>
+      <div class="crit-name">{_e(meta["nombre"])}</div>
+      <div class="crit-desc">{_e(meta["desc"])}</div>
     </div>
     <div style="text-align:right">
       <div class="crit-score-num" style="color:{color}">{score:.1f}%</div>
       {badge}
     </div>
   </div>
-  <div class="crit-bar"><div class="crit-fill {fill}" style="width:{min(score,100):.0f}%"></div></div>
+  <div class="crit-bar"><div class="crit-fill {fill}" style="width:{min(score, 100):.0f}%"></div></div>
   <div class="crit-obs">{observado}</div>
   {stats_html}
   {detail_html}
 </div>"""
 
 
-def _write_html_report(summary: Dict[str, Any], all_reports: List[Dict[str, Any]], path: Path) -> None:
-    date_str = summary.get("profiled_at", datetime.now().isoformat())[:19].replace("T", " ")
+def _write_html_report(
+    summary: Dict[str, Any], all_reports: List[Dict[str, Any]], path: Path
+) -> None:
+    date_str = summary.get("profiled_at", datetime.now().isoformat())[:19].replace(
+        "T", " "
+    )
     total = summary["files_profiled"]
     passed = summary["files_passed"]
     failed = summary["files_failed"]
@@ -631,14 +834,16 @@ details[open] .sum-arrow{transform:rotate(90deg)}.sum-name{font-weight:700;font-
     legend_items = ""
     for i, key in enumerate(_CRITERIA_ORDER, 1):
         meta = _CRITERION_META[key]
-        legend_items += (f'<div style="background:var(--card);border-radius:6px;padding:.65rem 1rem;box-shadow:0 1px 2px rgba(0,0,0,.06);border-left:3px solid var(--blue);display:flex;gap:.6rem;align-items:flex-start">'
-                         f'<span style="font-weight:800;color:var(--blue);font-size:.95rem;min-width:20px">{i}</span>'
-                         f'<div><div style="font-weight:700;font-size:.82rem">{_e(meta["nombre"])}</div>'
-                         f'<div style="font-size:.73rem;color:var(--muted);margin-top:1px">{_e(meta["desc"])}</div></div></div>')
+        legend_items += (
+            f'<div style="background:var(--card);border-radius:6px;padding:.65rem 1rem;box-shadow:0 1px 2px rgba(0,0,0,.06);border-left:3px solid var(--blue);display:flex;gap:.6rem;align-items:flex-start">'
+            f'<span style="font-weight:800;color:var(--blue);font-size:.95rem;min-width:20px">{i}</span>'
+            f'<div><div style="font-weight:700;font-size:.82rem">{_e(meta["nombre"])}</div>'
+            f'<div style="font-size:.73rem;color:var(--muted);margin-top:1px">{_e(meta["desc"])}</div></div></div>'
+        )
 
     crit_headers = "".join(
         f'<th onclick="sortTable(this)" title="{_e(_CRITERION_META[k]["desc"])}">'
-        f'{_e(_CRITERION_META[k]["nombre"])}</th>'
+        f"{_e(_CRITERION_META[k]['nombre'])}</th>"
         for k in _CRITERIA_ORDER
     )
     table_rows = ""
@@ -646,24 +851,32 @@ details[open] .sum-arrow{transform:rotate(90deg)}.sum-name{font-weight:700;font-
         fname = Path(fs["file"]).name
         ov = fs["overall_score"]
         status_badge = _badge_status(fs["passed"])
-        crit_cells = "".join(f'<td>{_score_cell(fs["criteria_scores"].get(k, 0))}</td>' for k in _CRITERIA_ORDER)
-        table_rows += (f'<tr>'
-                       f'<td title="{_e(fs["file"])}" style="max-width:220px;overflow:hidden;text-overflow:ellipsis">{_e(fname)}</td>'
-                       f'<td style="text-align:right">{fs["rows"]:,}</td>'
-                       f'<td style="text-align:right">{fs["columns"]}</td>'
-                       f'{crit_cells}'
-                       f'<td>{_score_cell(ov)}</td>'
-                       f'<td>{status_badge}</td>'
-                       f'</tr>')
+        crit_cells = "".join(
+            f"<td>{_score_cell(fs['criteria_scores'].get(k, 0))}</td>"
+            for k in _CRITERIA_ORDER
+        )
+        table_rows += (
+            f"<tr>"
+            f'<td title="{_e(fs["file"])}" style="max-width:220px;overflow:hidden;text-overflow:ellipsis">{_e(fname)}</td>'
+            f'<td style="text-align:right">{fs["rows"]:,}</td>'
+            f'<td style="text-align:right">{fs["columns"]}</td>'
+            f"{crit_cells}"
+            f"<td>{_score_cell(ov)}</td>"
+            f"<td>{status_badge}</td>"
+            f"</tr>"
+        )
 
     accordions = ""
     for report in all_reports:
         fname = Path(report["file"]).name
         ov = report["overall_score"]
         color = _score_color(ov)
-        meta_str = f'{report["rows"]:,} filas · {report["columns"]} columnas'
+        meta_str = f"{report['rows']:,} filas · {report['columns']} columnas"
         badge = _badge_status(report["passed"])
-        cards = "".join(_render_criterion_card(k, report["criteria"].get(k, {})) for k in _CRITERIA_ORDER)
+        cards = "".join(
+            _render_criterion_card(k, report["criteria"].get(k, {}))
+            for k in _CRITERIA_ORDER
+        )
         accordions += f"""
 <details class="file-block">
   <summary>
@@ -723,7 +936,7 @@ function sortTable(th) {
             f'<span class="bar-label">{_e(_CRITERION_META[k]["nombre"])}</span>'
             f'<div class="bar-track"><div class="bar-fill" style="width:{cavg:.1f}%;background:{ccolor}"></div></div>'
             f'<span class="bar-val" style="color:{ccolor}">{cavg:.0f}%</span>'
-            f'</div>'
+            f"</div>"
         )
 
     html = f"""<!DOCTYPE html>

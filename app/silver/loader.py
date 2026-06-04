@@ -10,7 +10,7 @@ from pyspark.sql import DataFrame, SparkSession
 from app.schemas.settings_schema import SilverConfig
 from app.utils.logging import UnifiedLogger
 
-_logger = UnifiedLogger("silver_loader")
+_logger = UnifiedLogger("SilverLoader", "silver")
 
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
 _SQL_DIR = _PROJECT_ROOT / "sql"
@@ -59,7 +59,12 @@ _IDENTITY_COLS = {
 _FK_JOIN_COLS = {
     "DIM_TIEMPO": ["IdTiempo"],
     "DIM_EJECUTORA": ["SEC_EJEC", "IdEjecutora"],
-    "DIM_UBIGEO": ["CODIGODEPARTAMENTO", "CODIGOPROVINCIA", "CODIGODISTRITO", "IdUbigeo"],
+    "DIM_UBIGEO": [
+        "CODIGODEPARTAMENTO",
+        "CODIGOPROVINCIA",
+        "CODIGODISTRITO",
+        "IdUbigeo",
+    ],
     "DIM_NIVEL_GOBIERNO": ["NIVEL_GOBIERNO", "IdNivelGobierno"],
     "DIM_SECTOR": ["SECTOR", "IdSector"],
     "DIM_PLIEGO": ["PLIEGO", "IdPliego"],
@@ -129,8 +134,9 @@ def _pymssql_exec(
             conn.close()
 
 
-
-def create_schema_and_tables(cfg: SilverConfig, password: str, drop: bool = False) -> None:
+def create_schema_and_tables(
+    cfg: SilverConfig, password: str, drop: bool = False
+) -> None:
     """Ejecuta tables_silver.sql dividiendo en sentencias individuales por GO."""
     # Ensure database exists
     _pymssql_exec(
@@ -230,7 +236,9 @@ def write_dimension(
 
     fk_cols = _FK_JOIN_COLS.get(table_short_name)
     if fk_cols:
-        server_df = spark.read.jdbc(url=url, table=table, properties=props).select(*fk_cols)
+        server_df = spark.read.jdbc(url=url, table=table, properties=props).select(
+            *fk_cols
+        )
     else:
         server_df = spark.read.jdbc(url=url, table=table, properties=props)
     _logger.info(f"{table} cargada y leída de vuelta")
@@ -255,6 +263,7 @@ def create_and_load(
     Orquesta la creación de tablas y carga completa en SQL Server.
     """
     from dotenv import load_dotenv
+
     load_dotenv(_PROJECT_ROOT / ".env")
 
     password = os.environ.get("MSSQL_SA_PASSWORD", "")
@@ -295,7 +304,11 @@ def create_and_load(
             continue
         _logger.info(f"Cargando dimensión {name} en SQL Server")
         server_dims[name] = write_dimension(
-            spark, dims[name], f"silver.{name}", url, jdbc_props,
+            spark,
+            dims[name],
+            f"silver.{name}",
+            url,
+            jdbc_props,
             table_short_name=name,
         )
         server_dims[name].cache()
@@ -311,7 +324,11 @@ def create_and_load(
             server_dims["DIM_FORMULARIO_SISMEPRE"],
         )
         server_dims["DIM_PREGUNTA_SISMEPRE"] = write_dimension(
-            spark, dim_preg_sis, "silver.DIM_PREGUNTA_SISMEPRE", url, jdbc_props,
+            spark,
+            dim_preg_sis,
+            "silver.DIM_PREGUNTA_SISMEPRE",
+            url,
+            jdbc_props,
             table_short_name="DIM_PREGUNTA_SISMEPRE",
         )
         server_dims["DIM_PREGUNTA_SISMEPRE"].cache()

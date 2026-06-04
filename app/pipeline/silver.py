@@ -9,10 +9,11 @@ _STEP_ORDER = ["quality", "schema", "load"]
 class SilverPipeline:
     def __init__(self, spark_client: SparkClient):
         self.spark = spark_client.get_session()
-        self.logger = UnifiedLogger("silver_pipeline")
+        self.logger = UnifiedLogger("SilverPipeline", "silver")
 
     def _load_dims(self, stage):
         from app.silver import transforms
+
         self.logger.info("Cargando dimensiones desde disco/reconstruyendo...")
         return transforms.build_dims(self.spark, stage)
 
@@ -43,14 +44,14 @@ class SilverPipeline:
 
         # Load RENAMU DFs
         renamu_dfs = []
-        for year in ("2021", "2022", "2023", "2024"):
+        for year in ("2021", "2022", "2023", "2024", "2025"):
             p = stage_dir / f"renamu_{year}.parquet"
             if p.exists():
                 renamu_dfs.append(self.spark.read.parquet(str(p)))
         result["renamu_dfs"] = renamu_dfs
 
-        # Load RENAMU 984
-        p984 = stage_dir / "renamu_984_modulo1963.parquet"
+        # Load RENAMU 984 (legacy key for backward compat)
+        p984 = stage_dir / "renamu_2025.parquet"
         if p984.exists():
             result["renamu_984"] = self.spark.read.parquet(str(p984))
         else:
@@ -69,7 +70,7 @@ class SilverPipeline:
         # Load stage/dims if skipped
         if start_idx > 0:
             stage = self._load_stage()
-        if start_idx == 2: # Step 'load'
+        if start_idx == 2:  # Step 'load'
             dims = self._load_dims(stage)
 
         for i, s in enumerate(_STEP_ORDER):
@@ -82,15 +83,21 @@ class SilverPipeline:
                     stage = quality.fix_all(self.spark)
                     self.logger.info("Paso 1/3 completado: Correcciones de calidad")
                 except Exception as e:
-                    self.logger.error(f"Error en paso de calidad: {e}", stack_trace=True)
+                    self.logger.error(
+                        f"Error en paso de calidad: {e}", stack_trace=True
+                    )
                     raise
             elif s == "schema":
-                self.logger.info("Paso 2/3: Construcción de dimensiones del modelo estrella")
+                self.logger.info(
+                    "Paso 2/3: Construcción de dimensiones del modelo estrella"
+                )
                 try:
                     dims = transforms.build_dims(self.spark, stage)
                     self.logger.info("Paso 2/3 completado: Dimensiones construidas")
                 except Exception as e:
-                    self.logger.error(f"Error en paso de esquema: {e}", stack_trace=True)
+                    self.logger.error(
+                        f"Error en paso de esquema: {e}", stack_trace=True
+                    )
                     raise
             elif s == "load":
                 self.logger.info("Paso 3/3: Creación de tablas y carga en SQL Server")
@@ -102,7 +109,9 @@ class SilverPipeline:
                         cfg=settings.config.silver,
                         drop=drop,
                     )
-                    self.logger.info("Paso 3/3 completado: Datos cargados en SQL Server")
+                    self.logger.info(
+                        "Paso 3/3 completado: Datos cargados en SQL Server"
+                    )
                 except Exception as e:
                     self.logger.error(f"Error en paso de carga: {e}", stack_trace=True)
                     raise

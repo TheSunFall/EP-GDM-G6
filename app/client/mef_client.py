@@ -14,7 +14,7 @@ TYPES_MAP = {
     "Fecha": pa.timestamp("s"),
 }
 
-_logger = UnifiedLogger("mef_client")
+_logger = UnifiedLogger("MEFClient", "mef_client")
 
 
 class MefClient(BaseClient):
