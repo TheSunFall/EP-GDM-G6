@@ -118,6 +118,7 @@ def build_dim_ejecutora(
     ingreso_df: DataFrame,
     esat_df: DataFrame,
     respuestas_df: DataFrame,
+    categorias_df: DataFrame,
 ) -> DataFrame:
     # EJECUTORA puede ser NULL en algunos registros → coalesce con SEC_EJEC (igual que el SQL proc)
     from_ingreso = ingreso_df.select(
@@ -138,11 +139,15 @@ def build_dim_ejecutora(
         F.col("SEC_EJEC").cast("string").alias("EJECUTORA_NOMBRE"),
     ).filter(F.col("SEC_EJEC").isNotNull())
 
+    cats = categorias_df.select("SEC_EJEC", "CATEGORIA").dropDuplicates(["SEC_EJEC"])
+
     return (
         from_ingreso.unionByName(from_esat, allowMissingColumns=True)
         .unionByName(from_resp, allowMissingColumns=True)
         .dropDuplicates(["SEC_EJEC"])
         .filter(F.col("EJECUTORA").isNotNull() & F.col("EJECUTORA_NOMBRE").isNotNull())
+        .join(cats, on="SEC_EJEC", how="left")
+        .withColumn("CATEGORIA", F.coalesce(F.col("CATEGORIA"), F.lit("")))
     )
 
 
@@ -734,10 +739,11 @@ def build_dims(spark: SparkSession, stage: dict) -> dict[str, DataFrame]:
     formulario = stage["rentas_formulario"]
     ano_aplic = stage["rentas_ano_aplicacion"]
     renamu_dfs = stage["renamu_dfs"]
+    categorias = stage["categorias_municipalidades"]
 
     dims = {
         "DIM_TIEMPO": build_dim_tiempo(ingreso, ano_aplic, renamu_dfs),
-        "DIM_EJECUTORA": build_dim_ejecutora(ingreso, esat, respuestas),
+        "DIM_EJECUTORA": build_dim_ejecutora(ingreso, esat, respuestas, categorias),
         "DIM_UBIGEO": build_dim_ubigeo(ingreso, esat, renamu_dfs),
         "DIM_NIVEL_GOBIERNO": build_dim_nivel_gobierno(ingreso),
         "DIM_SECTOR": build_dim_sector(ingreso),

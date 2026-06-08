@@ -42,6 +42,10 @@ class SilverPipeline:
             str(stage_dir / "rentas_ano_aplicacion.parquet")
         )
 
+        result["categorias_municipalidades"] = self.spark.read.parquet(
+            str(stage_dir / "categorias_municipalidades.parquet")
+        )
+
         # Load RENAMU DFs
         renamu_dfs = []
         for year in ("2021", "2022", "2023", "2024", "2025"):

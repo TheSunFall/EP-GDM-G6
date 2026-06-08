@@ -185,6 +185,30 @@ def fix_renamu(spark: SparkSession, year: str) -> DataFrame:
     return _log_count(f"renamu_{year}", df)
 
 
+def fix_categorias_municipalidades(
+    spark: SparkSession, esat_df: DataFrame
+) -> DataFrame:
+    csv_path = str(settings.project_root / "data" / "CategoriasMunicipalidades.csv")
+    categorias = (
+        spark.read.option("header", True)
+        .option("delimiter", ";")
+        .option("encoding", "UTF-8")
+        .csv(csv_path)
+        .withColumnRenamed("Municipalidad", "MUNICIPALIDAD")
+    )
+    joined = (
+        esat_df.select("SEC_EJEC", "MUNICIPALIDAD_NOMBRE")
+        .join(
+            categorias,
+            on=F.col("MUNICIPALIDAD_NOMBRE") == F.col("MUNICIPALIDAD"),
+            how="inner",
+        )
+        .select("SEC_EJEC", F.col("Categoria").alias("CATEGORIA"))
+        .dropDuplicates(["SEC_EJEC"])
+    )
+    return _log_count("categorias_municipalidades", joined)
+
+
 def fix_renamu_984(spark: SparkSession, year: str = "2025") -> DataFrame | None:
     path = _BRONZE / "RENAMU-984-Modulo1963.parquet"
     if not path.exists():
@@ -221,20 +245,38 @@ def fix_all(spark: SparkSession) -> dict[str, DataFrame | list[DataFrame]]:
         return df
 
     _logger.info("Procesando dataset SIAF - Ingreso")
-    result["ingreso_unified"] = _save("ingreso_unified", fix_ingreso(spark))
+    ingreso_df = fix_ingreso(spark)
 
     _logger.info("Procesando dataset SISMEPRE")
-    result["rentas_preguntas"] = _save("rentas_preguntas", fix_rentas_preguntas(spark))
-    result["rentas_formulario"] = _save(
-        "rentas_formulario", fix_rentas_formulario(spark)
+    preguntas_df = fix_rentas_preguntas(spark)
+    formulario_df = fix_rentas_formulario(spark)
+    esat_df = fix_rentas_esat(spark)
+    respuestas_df = fix_rentas_respuestas(spark)
+    ano_df = fix_rentas_ano_aplicacion(spark)
+
+    # Construir filtro de categorías municipales y filtrar datasets
+    _logger.info("Construyendo filtro de categorías municipales desde CategoriasMunicipalidades.csv")
+    categorias_df = fix_categorias_municipalidades(spark, esat_df)
+    result["categorias_municipalidades"] = _save(
+        "categorias_municipalidades", categorias_df
     )
-    result["rentas_esat"] = _save("rentas_esat_estadistica_atm", fix_rentas_esat(spark))
-    result["rentas_respuestas"] = _save(
-        "rentas_respuestas", fix_rentas_respuestas(spark)
-    )
-    result["rentas_ano_aplicacion"] = _save(
-        "rentas_ano_aplicacion", fix_rentas_ano_aplicacion(spark)
-    )
+
+    valid_sec_ejec = categorias_df.select("SEC_EJEC").distinct()
+    n_valid = valid_sec_ejec.count()
+    _logger.info(f"Filtrando por {n_valid} ejecutoras válidas según CategoriasMunicipalidades.csv")
+
+    ingreso_df = ingreso_df.join(valid_sec_ejec, on="SEC_EJEC", how="inner")
+    result["ingreso_unified"] = _save("ingreso_unified", ingreso_df)
+
+    esat_df = esat_df.join(valid_sec_ejec, on="SEC_EJEC", how="inner")
+    result["rentas_esat"] = _save("rentas_esat_estadistica_atm", esat_df)
+
+    respuestas_df = respuestas_df.join(valid_sec_ejec, on="SEC_EJEC", how="inner")
+    result["rentas_respuestas"] = _save("rentas_respuestas", respuestas_df)
+
+    result["rentas_preguntas"] = _save("rentas_preguntas", preguntas_df)
+    result["rentas_formulario"] = _save("rentas_formulario", formulario_df)
+    result["rentas_ano_aplicacion"] = _save("rentas_ano_aplicacion", ano_df)
 
     _logger.info("Procesando dataset RENAMU")
     renamu_dfs: list[DataFrame] = []

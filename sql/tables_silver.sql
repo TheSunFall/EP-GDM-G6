@@ -8,7 +8,8 @@ create table silver.DIM_EJECUTORA
         primary key,
     SEC_EJEC         int not null,
     EJECUTORA        int not null,
-    EJECUTORA_NOMBRE varchar(200) not null
+    EJECUTORA_NOMBRE varchar(200) not null,
+    CATEGORIA        varchar(10) not null default ''
 )
 go
 
