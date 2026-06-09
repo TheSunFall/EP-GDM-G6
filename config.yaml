@@ -4,7 +4,7 @@ silver:
   database:
     host: "localhost"
     port: 11423
-    database: "test"
+    database: "DLKH_MEF"
     dbschema: "silver"
     user: "sa"
 
