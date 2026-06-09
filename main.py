@@ -29,6 +29,15 @@ def main():
         help="Drop the existing silver schema and tables before creating and loading (idempotent run).",
     )
 
+    gold_parser = subparsers.add_parser(
+        "gold", help="Run the gold pipeline (build business marts from silver)"
+    )
+    gold_parser.add_argument(
+        "--drop",
+        action="store_true",
+        help="Drop and recreate the gold schema before loading (idempotent run).",
+    )
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -39,12 +48,15 @@ def main():
         _run_profile()
     elif args.command == "silver":
         _run_silver(args.step, getattr(args, "drop", False))
+    elif args.command == "gold":
+        _run_gold(getattr(args, "drop", False))
 
 
 def _run_all():
     _run_bronze()
     _run_profile()
     _run_silver()
+    _run_gold()
 
 
 def _run_bronze():
@@ -62,6 +74,14 @@ def _run_silver(step: str | None = None, drop: bool = False):
     spark = SparkClient()
     pipeline = SilverPipeline(spark)
     pipeline.run(step=step, drop=drop)
+
+
+def _run_gold(drop: bool = False):
+    from app.pipeline.gold import GoldPipeline
+
+    spark = SparkClient()
+    pipeline = GoldPipeline(spark)
+    pipeline.run(drop=drop)
 
 
 if __name__ == "__main__":
