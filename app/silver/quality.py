@@ -185,6 +185,54 @@ def fix_renamu(spark: SparkSession, year: str) -> DataFrame:
     return _log_count(f"renamu_{year}", df)
 
 
+def _normalize_municipalidad():
+    """UDF que normaliza nombres de municipalidad a una clave común para join."""
+    import re
+    import unicodedata
+
+    PREFIXES = [
+        "MUNICIPALIDAD DISTRITAL DE ",
+        "MUNICIPALIDAD PROVINCIAL DE ",
+        "MUNICIPALIDAD METROPOLITANA DE ",
+        "MUNICIPALIDAD DISTRITAL DEL ",
+        "MUNICIPALIDAD PROVINCIAL DEL ",
+        "MUNICIPALIDAD DISTRITAL ",
+        "MUNICIPALIDAD PROVINCIAL ",
+        "MUNICIPALIDAD METROPOLITANA ",
+        "M. D. DE ",
+        "M. P. DE ",
+        "M. P. DEL ",
+        "M. D. DEL ",
+        "M. D . DE ",
+        "M. D . ",
+        "M.P. DE ",
+        "M. D. ",
+        "M. P. ",
+        "M.P. ",
+    ]
+
+    def _norm(name: str) -> str:
+        if not name:
+            return ""
+        n = unicodedata.normalize("NFKD", name.upper())
+        n = n.encode("ascii", "ignore").decode("ascii")
+        n = re.sub(r"\s*\([^)]*\)\s*", " ", n)
+        for prefix in PREFIXES:
+            if n.startswith(prefix):
+                n = n[len(prefix) :]
+                break
+        n = n.lower().strip()
+        n = re.sub(r"\bsta\.?\b", "santa", n)
+        n = re.sub(r"\bsto\.?\b", "santo", n)
+        n = re.sub(r"\bstgo\.?\b", "santiago", n)
+        n = re.sub(r"\bj\.?\b", "jose", n)
+        n = re.sub(r"\s*-\s*", "-", n)
+        n = re.sub(r"\s+", " ", n).strip()
+        return n
+
+    return F.udf(_norm, "string")
+
+
 def fix_categorias_municipalidades(
     spark: SparkSession, esat_df: DataFrame
 ) -> DataFrame:
@@ -194,19 +242,27 @@ def fix_categorias_municipalidades(
         .option("delimiter", ";")
         .option("encoding", "UTF-8")
         .csv(csv_path)
-        .withColumnRenamed("Municipalidad", "MUNICIPALIDAD")
+    )
+    norm = _normalize_municipalidad()
+    esat_norm = esat_df.select(
+        "SEC_EJEC",
+        F.col("MUNICIPALIDAD_NOMBRE").alias("MUNICIPALIDAD_NOMBRE_ORIG"),
+        norm("MUNICIPALIDAD_NOMBRE").alias("_NORMALIZED"),
+    )
+    csv_norm = categorias.select(
+        F.col("Municipalidad").alias("MUNICIPALIDAD_ORIG"),
+        F.col("Categoria").alias("CATEGORIA"),
+        norm("Municipalidad").alias("_NORMALIZED"),
     )
     joined = (
-        esat_df.select("SEC_EJEC", "MUNICIPALIDAD_NOMBRE")
-        .join(
-            categorias,
-            on=F.col("MUNICIPALIDAD_NOMBRE") == F.col("MUNICIPALIDAD"),
-            how="inner",
-        )
-        .select("SEC_EJEC", F.col("Categoria").alias("CATEGORIA"))
+        esat_norm.join(csv_norm, on="_NORMALIZED", how="inner")
+        .select("SEC_EJEC", "CATEGORIA")
         .dropDuplicates(["SEC_EJEC"])
     )
-    return _log_count("categorias_municipalidades", joined)
+    _logger.info(
+        f"categorias_municipalidades: {joined.count()} ejecutoras mapeadas desde CategoriasMunicipalidades.csv"
+    )
+    return joined
 
 
 def fix_renamu_984(spark: SparkSession, year: str = "2025") -> DataFrame | None:
