@@ -41,7 +41,7 @@ class SparkClient:
         hadoop_bin = str(Path(os.environ.get("HADOOP_HOME", "")) / "bin")
         self.spark = (
             SparkSession.builder.appName("Analisis_Presupuesto_MEF")
-            .config("spark.driver.memory", "4g")
+            .config("spark.driver.memory", "8g")
             .config("spark.jars", mssql_jar)
             .config(
                 "spark.jars.packages", "com.microsoft.sqlserver:mssql-jdbc:13.4.0.jre11"

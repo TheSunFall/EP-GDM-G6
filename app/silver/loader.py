@@ -15,6 +15,40 @@ _logger = UnifiedLogger("SilverLoader", "silver")
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
 _SQL_DIR = _PROJECT_ROOT / "sql"
 
+# Columnas de clave natural para cada dimensión (usadas para evitar duplicados al insertar)
+_NATURAL_KEY_COLS: dict[str, list[str]] = {
+    "DIM_TIEMPO": ["IdTiempo"],
+    "DIM_EJECUTORA": ["SEC_EJEC"],
+    "DIM_UBIGEO": ["CODIGODEPARTAMENTO", "CODIGOPROVINCIA", "CODIGODISTRITO"],
+    "DIM_NIVEL_GOBIERNO": ["NIVEL_GOBIERNO"],
+    "DIM_SECTOR": ["SECTOR"],
+    "DIM_PLIEGO": ["PLIEGO"],
+    "DIM_RUBRO": ["RUBRO"],
+    "DIM_TIPO_RECURSO": ["TIPO_RECURSO"],
+    "DIM_FUENTE_FINANCIAMIENTO": ["FUENTE_FINANCIAMIENTO"],
+    "DIM_GENERICA": ["GENERICA", "SUBGENERICA", "SUBGENERICA_DET"],
+    "DIM_ESPECIFICA": ["ESPECIFICA", "ESPECIFICA_DET"],
+    "DIM_ANIO_APLICACION": ["ANO_APLICACION"],
+    "DIM_FORMULARIO_SISMEPRE": ["FORMULARIO_ID"],
+    "DIM_PREGUNTA_RENAMU": ["NOMBRE_CAMPO", "VALOR"],
+    "DIM_PREGUNTA_SISMEPRE": ["IdFormSismepre", "PREGUNTA_ID"],
+}
+
+# Columnas de clave natural para tablas de hechos
+_FACT_NATURAL_KEYS: dict[str, list[str]] = {
+    "FACT_INGRESO": [
+        "IdTiempo", "IdNivelGobierno", "IdSector", "IdPliego",
+        "IdEjecutora", "IdUbigeo", "IdRubro", "IdTipoRecurso",
+        "IdGenerica", "IdEspecifica", "MONTO_PIA", "MONTO_PIM", "MONTO_RECAUDADO",
+    ],
+    "FACT_FORMULARIO_SISMEPRE": [
+        "IdEjecutora", "IdAnioAplicacion", "PERIODO",
+        "IdFormulario", "IdPregunta", "RESPUESTA_ID", "RESPUESTA_TEXTO",
+        "RESPUESTA_DECIMAL", "RESPUESTA_ENTERO", "RESPUESTA_FECHA",
+    ],
+    "FACT_RENAMU": ["IdTiempo", "IdUbigeo", "TIPOMUNI", "IdPregunta"],
+}
+
 _ALL_SILVER_TABLES = [
     "FACT_RENAMU",
     "FACT_FORMULARIO_SISMEPRE",
@@ -217,6 +251,30 @@ def _drop_schema(cfg: SilverConfig, password: str) -> None:
     _logger.info("Esquema silver eliminado")
 
 
+def _filter_new_records(
+    spark: SparkSession,
+    df: DataFrame,
+    table: str,
+    url: str,
+    props: dict,
+    natural_keys: list[str],
+) -> DataFrame:
+    """Filtra filas que ya existen en la tabla SQL Server, dejando solo las nuevas."""
+    try:
+        existing = spark.read.jdbc(url=url, table=table, properties=props)
+        existing_keys = existing.select(*natural_keys).distinct()
+        new_df = df.join(existing_keys, on=natural_keys, how="left_anti")
+        n_new = new_df.count()
+        if n_new == 0:
+            _logger.info(f"{table}: 0 filas nuevas (todo existente)")
+        else:
+            _logger.info(f"{table}: {n_new} filas nuevas de {df.count()} totales")
+        return new_df
+    except Exception as e:
+        _logger.warning(f"No se pudo leer {table} para filtrar duplicados: {e}")
+        return df
+
+
 def write_dimension(
     spark: SparkSession,
     df: DataFrame,
@@ -226,13 +284,23 @@ def write_dimension(
     table_short_name: str = "",
 ) -> DataFrame:
     """
-    Escribe una dimensión y devuelve el DataFrame con los IDs reales del servidor.
+    Escribe una dimensión (solo filas nuevas) y devuelve el DataFrame con los IDs reales del servidor.
     """
     id_col = _IDENTITY_COLS.get(table)
     write_df = df.drop(id_col) if (id_col and id_col in df.columns) else df
 
-    _logger.info(f"Escribiendo {table}")
-    write_df.write.jdbc(url=url, table=table, mode="append", properties=props)
+    natural_keys = _NATURAL_KEY_COLS.get(table_short_name)
+    if natural_keys:
+        write_df = _filter_new_records(
+            spark, write_df, table, url, props, natural_keys
+        )
+
+    n_new = write_df.count()
+    if n_new > 0:
+        _logger.info(f"Escribiendo {n_new} filas nuevas en {table}")
+        write_df.write.jdbc(url=url, table=table, mode="append", properties=props)
+    else:
+        _logger.info(f"{table}: sin filas nuevas, se omite escritura")
 
     fk_cols = _FK_JOIN_COLS.get(table_short_name)
     if fk_cols:
@@ -245,11 +313,25 @@ def write_dimension(
     return server_df
 
 
-def write_fact(df: DataFrame, table: str, url: str, props: dict) -> None:
-    """Escribe una tabla de hechos en SQL Server."""
-    _logger.info(f"Escribiendo {table}")
-    df.repartition(4).write.jdbc(url=url, table=table, mode="append", properties=props)
-    _logger.info(f"{table} cargada correctamente")
+def write_fact(
+    spark: SparkSession, df: DataFrame, table: str, url: str, props: dict
+) -> None:
+    """Escribe una tabla de hechos en SQL Server (solo filas nuevas)."""
+    table_short = table.replace("silver.", "")
+    natural_keys = _FACT_NATURAL_KEYS.get(table_short)
+    if natural_keys:
+        df = _filter_new_records(
+            spark, df, table, url, props, natural_keys
+        )
+
+    n_new = df.count()
+    if n_new > 0:
+        _logger.info(f"Escribiendo {n_new} filas nuevas en {table}")
+        df.repartition(4).write.jdbc(
+            url=url, table=table, mode="append", properties=props
+        )
+    else:
+        _logger.info(f"{table}: sin filas nuevas, se omite escritura")
 
 
 def create_and_load(
@@ -343,7 +425,7 @@ def create_and_load(
     for name in ("FACT_INGRESO", "FACT_FORMULARIO_SISMEPRE", "FACT_RENAMU"):
         if name in facts:
             _logger.info(f"Cargando tabla de hechos {name}")
-            write_fact(facts[name], f"silver.{name}", url, jdbc_props)
+            write_fact(spark, facts[name], f"silver.{name}", url, jdbc_props)
             _logger.info(f"Tabla de hechos {name} cargada exitosamente")
 
     for sdf in server_dims.values():
