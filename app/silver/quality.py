@@ -2,11 +2,13 @@
 
 from pathlib import Path
 
+import pyarrow.parquet as pq
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
 from app.settings.settings import settings
 from app.utils.logging import UnifiedLogger
+from app.utils.manifest import bronze_row_count_map, stage_entry, write_stage_manifest
 
 _logger = UnifiedLogger("SilverQuality", "silver")
 
@@ -350,5 +352,50 @@ def fix_all(spark: SparkSession) -> dict[str, DataFrame | list[DataFrame]]:
     result["renamu_dfs"] = renamu_dfs
     result["renamu_984"] = df_984
 
+    _write_stage_manifest()
     _logger.info("Correcciones de calidad completadas para todos los datasets")
     return result
+
+
+def _write_stage_manifest():
+    """Scan stage parquet files and write a manifest with row counts and bronze source totals."""
+    bronze_map = bronze_row_count_map(_BRONZE / "manifest.parquet")
+
+    _STAGE_TO_BRONZE_SOURCES: dict[str, list[tuple[str, str]]] = {
+        "ingreso_unified": [("SIAF", y) for y in ("2021", "2022", "2023", "2024")],
+        "rentas_preguntas": [("SISMEPRE", "rentas_preguntas")],
+        "rentas_formulario": [("SISMEPRE", "rentas_formulario")],
+        "rentas_esat_estadistica_atm": [("SISMEPRE", "rentas_esat_estadistica_atm")],
+        "rentas_respuestas": [("SISMEPRE", "rentas_respuestas")],
+        "rentas_ano_aplicacion": [("SISMEPRE", "rentas_ano_aplicacion")],
+        "categorias_municipalidades": [],
+    }
+    for y in ("2021", "2022", "2023", "2024", "2025"):
+        _STAGE_TO_BRONZE_SOURCES[f"renamu_{y}"] = [("RENAMU", y if y != "2025" else "984-Modulo1963")]
+
+    entries = []
+    for stage_name, bronze_sources in _STAGE_TO_BRONZE_SOURCES.items():
+        stage_path = _STAGE / f"{stage_name}.parquet"
+        if not stage_path.exists():
+            continue
+        dataset = pq.ParquetDataset(str(stage_path))
+        row_count = sum(fragment.metadata.num_rows for fragment in dataset.fragments)
+        file_size = sum(f.stat().st_size for f in stage_path.rglob("*") if f.is_file())
+
+        bronze_total = 0
+        if bronze_sources:
+            for src_name, mod_prefix in bronze_sources:
+                for (b_src, b_mod), b_rc in bronze_map.items():
+                    if b_src == src_name and b_mod.startswith(mod_prefix):
+                        bronze_total += b_rc
+
+        entries.append(stage_entry(stage_name, row_count, file_size, bronze_total))
+        _logger.info(
+            f"Stage manifest: {stage_name}.parquet → {row_count} filas, "
+            f"{file_size} bytes, bronze_total={bronze_total}"
+        )
+
+    if entries:
+        manifest_path = _STAGE / "manifest.parquet"
+        write_stage_manifest(entries, manifest_path)
+        _logger.info(f"Stage manifest escrito: {manifest_path} ({len(entries)} entradas)")

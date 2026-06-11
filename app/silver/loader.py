@@ -327,7 +327,8 @@ def write_fact(
     n_new = df.count()
     if n_new > 0:
         _logger.info(f"Escribiendo {n_new} filas nuevas en {table}")
-        df.repartition(4).write.jdbc(
+        num_partitions = max(4, n_new // 500_000)
+        df.repartition(num_partitions).write.jdbc(
             url=url, table=table, mode="append", properties=props
         )
     else:
@@ -354,6 +355,7 @@ def create_and_load(
         "driver": "com.microsoft.sqlserver.jdbc.SQLServerDriver",
         "user": cfg.database.user,
         "password": password,
+        "batchsize": "10000",
     }
 
     # 1. DDL via pymssql

@@ -42,6 +42,7 @@ class SparkClient:
         self.spark = (
             SparkSession.builder.appName("Analisis_Presupuesto_MEF")
             .config("spark.driver.memory", "8g")
+            .config("spark.sql.shuffle.partitions", "32")
             .config("spark.jars", mssql_jar)
             .config(
                 "spark.jars.packages", "com.microsoft.sqlserver:mssql-jdbc:13.4.0.jre11"

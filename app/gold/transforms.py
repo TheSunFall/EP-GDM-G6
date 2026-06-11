@@ -8,8 +8,50 @@ marts de negocio como DataFrames. Los joins hecho->dimension son por surrogate k
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
+from app.utils.logging import UnifiedLogger
+
+_logger = UnifiedLogger("GoldTransforms", "gold")
+
+
 def _read(spark: SparkSession, url: str, props: dict, table: str) -> DataFrame:
     return spark.read.jdbc(url=url, table=f"silver.{table}", properties=props)
+
+
+def _read_partitioned(
+    spark: SparkSession,
+    url: str,
+    props: dict,
+    table: str,
+    partition_column: str,
+    num_partitions: int = 16,
+) -> DataFrame:
+    """Lee una tabla grande por JDBC con lectura paralela en múltiples particiones.
+
+    Sin particionamiento, spark.read.jdbc usa UNA sola conexión JDBC y crea UN solo
+    partition, lo que significa que millones de filas se leen secuencialmente en un
+    solo hilo. Esto es el cuello de botella principal para FACT_RENAMU (~12M filas)
+    y FACT_FORMULARIO_SISMEPRE.
+    """
+    full_table = f"silver.{table}"
+    bounds = spark.read.jdbc(url=url, table=full_table, properties=props).agg(
+        F.min(partition_column).alias("lo"),
+        F.max(partition_column).alias("hi"),
+    ).collect()[0]
+
+    lo, hi = int(bounds["lo"]), int(bounds["hi"])
+    _logger.info(
+        f"Leyendo {full_table} particionado por {partition_column} "
+        f"[{lo}, {hi}] en {num_partitions} particiones"
+    )
+    return spark.read.jdbc(
+        url=url,
+        table=full_table,
+        column=partition_column,
+        lowerBound=lo,
+        upperBound=hi + 1,
+        numPartitions=num_partitions,
+        properties=props,
+    )
 
 
 # ── Dimensiones de presentacion ─────────────────────────────────────────────
@@ -76,17 +118,19 @@ def _pct(rec, pim):
     return F.col(rec).cast("double") / F.when(F.col(pim) == 0, None).otherwise(F.col(pim))
 
 
-def build_mart_ingresos_geografico(spark: SparkSession, url: str, props: dict) -> DataFrame:
-    f = _read(spark, url, props, "FACT_INGRESO")
-    t = _read(spark, url, props, "DIM_TIEMPO").select("IdTiempo", "ANIO", "MES")
-    u = _read(spark, url, props, "DIM_UBIGEO").select(
-        "IdUbigeo", "DEPARTAMENTO", "PROVINCIA", "DISTRITO"
-    )
+def build_mart_ingresos_geografico(
+    spark: SparkSession, url: str, props: dict,
+    fact_ingreso: DataFrame, dim_tiempo: DataFrame, dim_ubigeo: DataFrame,
+) -> DataFrame:
     ng = _read(spark, url, props, "DIM_NIVEL_GOBIERNO").select(
         "IdNivelGobierno", "NIVEL_GOBIERNO_NOMBRE"
     )
+    t = dim_tiempo.select("IdTiempo", "ANIO", "MES")
+    u = dim_ubigeo.select("IdUbigeo", "DEPARTAMENTO", "PROVINCIA", "DISTRITO")
     return (
-        f.join(t, "IdTiempo").join(u, "IdUbigeo").join(ng, "IdNivelGobierno")
+        fact_ingreso.join(F.broadcast(t), "IdTiempo")
+        .join(F.broadcast(u), "IdUbigeo")
+        .join(F.broadcast(ng), "IdNivelGobierno")
         .groupBy(
             F.col("IdTiempo").alias("AnioMes"),
             F.col("ANIO").alias("Anio"),
@@ -118,14 +162,19 @@ def build_mart_ingresos_geografico(spark: SparkSession, url: str, props: dict) -
     )
 
 
-def build_mart_ingresos_clasificador(spark: SparkSession, url: str, props: dict) -> DataFrame:
-    f = _read(spark, url, props, "FACT_INGRESO")
-    t = _read(spark, url, props, "DIM_TIEMPO").select("IdTiempo", "ANIO")
+def build_mart_ingresos_clasificador(
+    spark: SparkSession, url: str, props: dict,
+    fact_ingreso: DataFrame, dim_tiempo: DataFrame,
+) -> DataFrame:
+    t = dim_tiempo.select("IdTiempo", "ANIO")
     r = _read(spark, url, props, "DIM_RUBRO").select("IdRubro", "RUBRO_NOMBRE")
     tr = _read(spark, url, props, "DIM_TIPO_RECURSO").select("IdTipoRecurso", "TIPO_RECURSO_NOMBRE")
     g = _read(spark, url, props, "DIM_GENERICA").select("IdGenerica", "GENERICA_NOMBRE", "SUBGENERICA_NOMBRE")
     return (
-        f.join(t, "IdTiempo").join(r, "IdRubro").join(tr, "IdTipoRecurso").join(g, "IdGenerica")
+        fact_ingreso.join(F.broadcast(t), "IdTiempo")
+        .join(F.broadcast(r), "IdRubro")
+        .join(F.broadcast(tr), "IdTipoRecurso")
+        .join(F.broadcast(g), "IdGenerica")
         .groupBy(
             F.col("ANIO").alias("Anio"),
             F.col("RUBRO_NOMBRE").alias("Rubro"),
@@ -150,13 +199,18 @@ def build_mart_ingresos_clasificador(spark: SparkSession, url: str, props: dict)
     )
 
 
-def build_mart_ingresos_ejecutora(spark: SparkSession, url: str, props: dict) -> DataFrame:
-    f = _read(spark, url, props, "FACT_INGRESO")
-    t = _read(spark, url, props, "DIM_TIEMPO").select("IdTiempo", "ANIO")
-    e = _read(spark, url, props, "DIM_EJECUTORA").select("IdEjecutora", "SEC_EJEC", "EJECUTORA_NOMBRE")
-    u = _read(spark, url, props, "DIM_UBIGEO").select("IdUbigeo", "DEPARTAMENTO")
+def build_mart_ingresos_ejecutora(
+    spark: SparkSession, url: str, props: dict,
+    fact_ingreso: DataFrame, dim_tiempo: DataFrame, dim_ejecutora: DataFrame,
+    dim_ubigeo: DataFrame,
+) -> DataFrame:
+    t = dim_tiempo.select("IdTiempo", "ANIO")
+    e = dim_ejecutora.select("IdEjecutora", "SEC_EJEC", "EJECUTORA_NOMBRE")
+    u = dim_ubigeo.select("IdUbigeo", "DEPARTAMENTO")
     return (
-        f.join(t, "IdTiempo").join(e, "IdEjecutora").join(u, "IdUbigeo")
+        fact_ingreso.join(F.broadcast(t), "IdTiempo")
+        .join(F.broadcast(e), "IdEjecutora")
+        .join(F.broadcast(u), "IdUbigeo")
         .groupBy(
             F.col("ANIO").alias("Anio"),
             F.col("IdEjecutora"),
@@ -185,10 +239,13 @@ def build_mart_ingresos_ejecutora(spark: SparkSession, url: str, props: dict) ->
 
 # ── Mart SISMEPRE (predial) - tall ──────────────────────────────────────────
 
-def build_mart_predial(spark: SparkSession, url: str, props: dict) -> DataFrame:
-    f = _read(spark, url, props, "FACT_FORMULARIO_SISMEPRE")
+def build_mart_predial(
+    spark: SparkSession, url: str, props: dict,
+    dim_ejecutora: DataFrame,
+) -> DataFrame:
+    f = _read_partitioned(spark, url, props, "FACT_FORMULARIO_SISMEPRE", "IdEjecutora")
     aa = _read(spark, url, props, "DIM_ANIO_APLICACION").select("IdAnioAplicacion", "ANO_APLICACION")
-    e = _read(spark, url, props, "DIM_EJECUTORA").select("IdEjecutora", "SEC_EJEC", "EJECUTORA_NOMBRE")
+    e = dim_ejecutora.select("IdEjecutora", "SEC_EJEC", "EJECUTORA_NOMBRE")
     fo = _read(spark, url, props, "DIM_FORMULARIO_SISMEPRE").select(
         F.col("IdFormSismepre").alias("IdFormulario"), F.col("TITULO")
     )
@@ -196,8 +253,10 @@ def build_mart_predial(spark: SparkSession, url: str, props: dict) -> DataFrame:
         F.col("IdPreguntaSismepre").alias("IdPregunta"), F.col("DESCRIPCION")
     )
     return (
-        f.join(aa, "IdAnioAplicacion").join(e, "IdEjecutora")
-        .join(fo, "IdFormulario").join(p, "IdPregunta")
+        f.join(F.broadcast(aa), "IdAnioAplicacion")
+        .join(F.broadcast(e), "IdEjecutora")
+        .join(F.broadcast(fo), "IdFormulario")
+        .join(F.broadcast(p), "IdPregunta")
         .select(
             F.col("ANO_APLICACION").cast("smallint").alias("Anio"),
             F.col("PERIODO").cast("smallint").alias("Periodo"),
@@ -223,9 +282,12 @@ def build_mart_predial(spark: SparkSession, url: str, props: dict) -> DataFrame:
 
 # ── Mart RENAMU (indicadores municipales) - tall, resuelve factless ─────────
 
-def build_mart_renamu(spark: SparkSession, url: str, props: dict) -> DataFrame:
-    f = _read(spark, url, props, "FACT_RENAMU")
-    u = _read(spark, url, props, "DIM_UBIGEO").select("IdUbigeo", "DEPARTAMENTO", "PROVINCIA", "DISTRITO")
+def build_mart_renamu(
+    spark: SparkSession, url: str, props: dict,
+    dim_ubigeo: DataFrame,
+) -> DataFrame:
+    f = _read_partitioned(spark, url, props, "FACT_RENAMU", "IdPregunta")
+    u = dim_ubigeo.select("IdUbigeo", "DEPARTAMENTO", "PROVINCIA", "DISTRITO")
     p = _read(spark, url, props, "DIM_PREGUNTA_RENAMU").select("IdPregunta", "NOMBRE_CAMPO", "DESCRIPCION", "VALOR")
 
     valor_num = F.expr("try_cast(VALOR as decimal(18,2))")
@@ -235,7 +297,8 @@ def build_mart_renamu(spark: SparkSession, url: str, props: dict) -> DataFrame:
         F.lit(False),
     )
     return (
-        f.join(u, "IdUbigeo").join(p, "IdPregunta")
+        f.join(F.broadcast(u), "IdUbigeo")
+        .join(F.broadcast(p), "IdPregunta")
         .select(
             F.col("IdTiempo").cast("smallint").alias("Anio"),
             F.col("IdUbigeo").cast("int"),
@@ -255,15 +318,49 @@ def build_mart_renamu(spark: SparkSession, url: str, props: dict) -> DataFrame:
 
 # ── Orquestador ─────────────────────────────────────────────────────────────
 
-def build_all(spark: SparkSession, url: str, props: dict) -> dict[str, DataFrame]:
-    """Devuelve {nombre_tabla_gold: DataFrame} en orden de carga (dims primero)."""
-    return {
+def build_all(
+    spark: SparkSession, url: str, props: dict
+) -> tuple[dict[str, DataFrame], list[DataFrame]]:
+    """Devuelve ({nombre_tabla_gold: DataFrame}, [cached_dfs]) en orden de carga.
+
+    Las dimensiones compartidas (UBIGEO, EJECUTORA, TIEMPO) se leen UNA sola vez
+    y se cachean para evitar lecturas JDBC redundantes entre marts.
+    Las tablas de hechos grandes se leen con lectura JDBC particionada.
+
+    Devuelve la lista de DataFrames cacheados para que el llamador los libere
+    tras completar las escrituras (los DataFrames son lazy y necesitan el cache
+    vivo durante la materialización).
+    """
+    # Dimensiones compartidas: leer una vez, cachear
+    _logger.info("Leyendo y cacheando dimensiones compartidas de silver")
+    dim_tiempo = _read(spark, url, props, "DIM_TIEMPO").cache()
+    dim_ubigeo = _read(spark, url, props, "DIM_UBIGEO").cache()
+    dim_ejecutora = _read(spark, url, props, "DIM_EJECUTORA").cache()
+
+    # Hecho compartido: FACT_INGRESO lo usan 3 marts SIAF
+    _logger.info("Leyendo FACT_INGRESO con lectura particionada")
+    fact_ingreso = _read_partitioned(
+        spark, url, props, "FACT_INGRESO", "IdTiempo"
+    ).cache()
+
+    cached = [fact_ingreso, dim_tiempo, dim_ubigeo, dim_ejecutora]
+
+    tables = {
         "DIM_CALENDARIO": build_dim_calendario(spark, url, props),
         "DIM_ANIO": build_dim_anio(spark, url, props),
         "DIM_GEOGRAFIA": build_dim_geografia(spark, url, props),
-        "MART_INGRESOS_GEOGRAFICO": build_mart_ingresos_geografico(spark, url, props),
-        "MART_INGRESOS_CLASIFICADOR": build_mart_ingresos_clasificador(spark, url, props),
-        "MART_INGRESOS_EJECUTORA": build_mart_ingresos_ejecutora(spark, url, props),
-        "MART_PREDIAL": build_mart_predial(spark, url, props),
-        "MART_RENAMU": build_mart_renamu(spark, url, props),
+        "MART_INGRESOS_GEOGRAFICO": build_mart_ingresos_geografico(
+            spark, url, props, fact_ingreso, dim_tiempo, dim_ubigeo,
+        ),
+        "MART_INGRESOS_CLASIFICADOR": build_mart_ingresos_clasificador(
+            spark, url, props, fact_ingreso, dim_tiempo,
+        ),
+        "MART_INGRESOS_EJECUTORA": build_mart_ingresos_ejecutora(
+            spark, url, props, fact_ingreso, dim_tiempo, dim_ejecutora, dim_ubigeo,
+        ),
+        "MART_PREDIAL": build_mart_predial(spark, url, props, dim_ejecutora),
+        "MART_RENAMU": build_mart_renamu(spark, url, props, dim_ubigeo),
     }
+
+    _logger.info(f"Tablas gold construidas: {len(tables)} tablas")
+    return tables, cached

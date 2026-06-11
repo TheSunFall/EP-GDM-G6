@@ -28,6 +28,11 @@ def main():
         action="store_true",
         help="Drop the existing silver schema and tables before creating and loading (idempotent run).",
     )
+    silver_parser.add_argument(
+        "--skip-unchanged",
+        action="store_true",
+        help="Skip silver processing if all bronze dataset row counts match the previous silver run.",
+    )
 
     gold_parser = subparsers.add_parser(
         "gold", help="Run the gold pipeline (build business marts from silver)"
@@ -47,7 +52,7 @@ def main():
     elif args.command == "profile":
         _run_profile()
     elif args.command == "silver":
-        _run_silver(args.step, getattr(args, "drop", False))
+        _run_silver(args.step, getattr(args, "drop", False), getattr(args, "skip_unchanged", False))
     elif args.command == "gold":
         _run_gold(getattr(args, "drop", False))
 
@@ -70,10 +75,10 @@ def _run_profile():
     run_profile(argparse.Namespace())
 
 
-def _run_silver(step: str | None = None, drop: bool = False):
+def _run_silver(step: str | None = None, drop: bool = False, skip_unchanged: bool = False):
     spark = SparkClient()
     pipeline = SilverPipeline(spark)
-    pipeline.run(step=step, drop=drop)
+    pipeline.run(step=step, drop=drop, skip_unchanged=skip_unchanged)
 
 
 def _run_gold(drop: bool = False):

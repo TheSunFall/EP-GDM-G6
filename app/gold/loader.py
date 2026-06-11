@@ -97,10 +97,13 @@ def create_schema_and_tables(
 
 
 def write_table(
-    df: DataFrame, table: str, url: str, props: dict, num_partitions: int = 8
+    df: DataFrame, table: str, url: str, props: dict, num_partitions: int | None = None
 ) -> None:
     """Escribe un DataFrame en gold.<table> truncando la tabla (preserva el DDL)."""
-    _logger.info(f"Escribiendo gold.{table}")
+    row_count = df.count()
+    if num_partitions is None:
+        num_partitions = max(8, row_count // 500_000)
+    _logger.info(f"Escribiendo gold.{table} ({row_count} filas, {num_partitions} particiones)")
     (
         df.repartition(num_partitions)
         .write.format("jdbc")

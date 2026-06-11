@@ -10,6 +10,8 @@ wheels/
 .venv
 
 # Data
-data/
+data/bronze
+data/profiling
+data/silver
 logs/
 .env

@@ -1,6 +1,9 @@
+import pyarrow.parquet as pq
+
 from app.client.mef_client import MefClient
 from app.settings.settings import settings
 from app.utils.logging import UnifiedLogger
+from app.utils.manifest import bronze_entry, write_bronze_manifest
 
 
 class BronzePipeline:
@@ -9,6 +12,10 @@ class BronzePipeline:
 
     def run(self):
         self.logger.info("Iniciando Bronze Pipeline")
+        manifest_entries = []
+        seen_files: set[str] = set()
+        api_path = settings.project_root / settings.config.api.path
+
         for dataset in settings.config.datasets:
             self.logger.info(f"Descargando dataset: {dataset.name}")
             client = MefClient(fs_url=dataset.url)
@@ -28,4 +35,24 @@ class BronzePipeline:
                     f"Error descargando dataset {dataset.name}: {e}", stack_trace=True
                 )
                 raise
+
+            prefix = f"{dataset.name}-"
+            for f in sorted(api_path.glob(f"{prefix}*.parquet")):
+                if f.name in seen_files:
+                    continue
+                seen_files.add(f.name)
+                pf = pq.ParquetFile(f)
+                row_count = pf.metadata.num_rows
+                file_size = f.stat().st_size
+                module_name = f.name[len(prefix) : -len(".parquet")]
+                manifest_entries.append(
+                    bronze_entry(dataset.name, module_name, row_count, file_size)
+                )
+                self.logger.info(f"Bronze manifest: {f.name} → {row_count} filas, {file_size} bytes")
+
+        if manifest_entries:
+            manifest_path = api_path / "manifest.parquet"
+            write_bronze_manifest(manifest_entries, manifest_path)
+            self.logger.info(f"Bronze manifest escrito: {manifest_path} ({len(manifest_entries)} entradas)")
+
         self.logger.info("Bronze Pipeline completado")

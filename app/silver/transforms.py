@@ -1,5 +1,7 @@
 """Construcción del modelo estrella Silver a partir de los DataFrames de stage."""
 
+from functools import reduce
+
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
@@ -664,10 +666,6 @@ def build_fact_renamu(
             )
             continue
 
-        n = len(question_cols)
-        pairs = ", ".join(f"'{c}', CAST(`{c}` AS STRING)" for c in question_cols)
-        stack_expr = f"stack({n}, {pairs}) as (NOMBRE_CAMPO, VALOR)"
-
         fixed_select = [
             F.col(year_col).cast("int").alias("ANO"),
             F.col(ccdd_col).cast("smallint").alias("CCDD"),
@@ -678,11 +676,25 @@ def build_fact_renamu(
             else F.lit("").alias("TIPOMUNI"),
         ]
 
+        question_structs = [
+            F.struct(
+                F.lit(c).alias("NOMBRE_CAMPO"),
+                F.col(c).cast("string").alias("VALOR"),
+            )
+            for c in question_cols
+        ]
+
         unpivoted = (
-            rdf.repartition(8)
-            .select(*fixed_select, F.expr(stack_expr))
+            rdf.select(
+                *fixed_select,
+                F.explode(F.array(question_structs)).alias("_uv"),
+            )
+            .select(
+                "ANO", "CCDD", "CCPP", "CCDI", "TIPOMUNI",
+                F.col("_uv.NOMBRE_CAMPO"),
+                F.col("_uv.VALOR"),
+            )
             .filter(F.col("NOMBRE_CAMPO").isNotNull())
-            # Truncar VALOR a 300 chars (coherente con build_dim_pregunta_renamu)
             .withColumn(
                 "VALOR", F.substring(F.coalesce(F.col("VALOR"), F.lit("")), 1, 300)
             )
@@ -693,15 +705,20 @@ def build_fact_renamu(
     if not all_parts:
         raise ValueError("No hay datos RENAMU para construir FACT_RENAMU")
 
-    combined = all_parts[0]
-    for p in all_parts[1:]:
-        combined = combined.unionByName(p, allowMissingColumns=True)
+    combined = reduce(
+        lambda a, b: a.unionByName(b, allowMissingColumns=True), all_parts
+    )
 
     return (
         combined.filter(F.col("ANO").isNotNull() & F.col("CCDD").isNotNull())
         .join(
-            ubigeo_d.select(
-                "CODIGODEPARTAMENTO", "CODIGOPROVINCIA", "CODIGODISTRITO", "IdUbigeo"
+            F.broadcast(
+                ubigeo_d.select(
+                    "CODIGODEPARTAMENTO",
+                    "CODIGOPROVINCIA",
+                    "CODIGODISTRITO",
+                    "IdUbigeo",
+                )
             ),
             on=[
                 F.col("CCDD") == F.col("CODIGODEPARTAMENTO"),
@@ -711,7 +728,7 @@ def build_fact_renamu(
             how="inner",
         )
         .join(
-            preg_d.select("NOMBRE_CAMPO", "VALOR", "IdPregunta"),
+            F.broadcast(preg_d.select("NOMBRE_CAMPO", "VALOR", "IdPregunta")),
             on=["NOMBRE_CAMPO", "VALOR"],
             how="inner",
         )

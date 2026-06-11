@@ -40,9 +40,13 @@ class GoldPipeline:
 
             # 2. Construir y escribir dimensiones + marts via Spark JDBC
             self.logger.info("Paso 2/2: Construccion y carga de marts con Spark")
-            tables = transforms.build_all(self.spark, url, props)
+            tables, cached = transforms.build_all(self.spark, url, props)
             for name, df in tables.items():
                 loader.write_table(df, name, url, props)
+
+            # Liberar caches compartidos tras completar todas las escrituras
+            for cdf in cached:
+                cdf.unpersist()
         except Exception as e:
             self.logger.error(f"Error en Gold Pipeline: {e}", stack_trace=True)
             raise
