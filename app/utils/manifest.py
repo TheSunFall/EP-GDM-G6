@@ -88,3 +88,74 @@ def stage_bronze_row_count_total_map(manifest_path: str | Path) -> dict[str, int
         total = table.column("bronze_row_count_total")[i].as_py()
         result[stage] = total
     return result
+
+
+# Mapeo de cada tabla stage a sus fuentes bronze (source_name, module_prefix).
+# Usado tanto por quality._write_stage_manifest() como por silver.py skip_unchanged.
+STAGE_TO_BRONZE_SOURCES: dict[str, list[tuple[str, str]]] = {
+    "ingreso_unified": [("SIAF", y) for y in ("2021", "2022", "2023", "2024")],
+    "rentas_preguntas": [("SISMEPRE", "rentas_preguntas")],
+    "rentas_formulario": [("SISMEPRE", "rentas_formulario")],
+    "rentas_esat_estadistica_atm": [("SISMEPRE", "rentas_esat_estadistica_atm")],
+    "rentas_respuestas": [("SISMEPRE", "rentas_respuestas")],
+    "rentas_ano_aplicacion": [("SISMEPRE", "rentas_ano_aplicacion")],
+    "categorias_municipalidades": [],
+}
+for _y in ("2021", "2022", "2023", "2024", "2025"):
+    STAGE_TO_BRONZE_SOURCES[f"renamu_{_y}"] = [
+        ("RENAMU", _y if _y != "2025" else "984-Modulo1963")
+    ]
+
+
+def _compute_bronze_total(
+    bronze_map: dict[tuple[str, str], int],
+    sources: list[tuple[str, str]],
+) -> int:
+    """Calcula la suma de filas bronze para una lista de fuentes (source_name, module_prefix)."""
+    total = 0
+    for src_name, mod_prefix in sources:
+        for (b_src, b_mod), b_rc in bronze_map.items():
+            if b_src == src_name and b_mod.startswith(mod_prefix):
+                total += b_rc
+    return total
+
+
+def bronze_unchanged(
+    bronze_manifest_path: str | Path,
+    stage_manifest_path: str | Path,
+) -> tuple[bool, str]:
+    """
+    Compara los row counts actuales del bronze manifest contra los
+    bronze_row_count_total registrados en el stage manifest.
+
+    Retorna (unchanged: bool, detail_message: str).
+    """
+    bronze_path = Path(bronze_manifest_path)
+    stage_path = Path(stage_manifest_path)
+
+    if not bronze_path.exists() or not stage_path.exists():
+        return False, "Manifiestos no encontrados"
+
+    bronze_map = bronze_row_count_map(bronze_path)
+    stage_map = stage_bronze_row_count_total_map(stage_path)
+
+    if not stage_map:
+        return False, "Stage manifest vacío"
+
+    mismatches: list[str] = []
+    for stage_name, sources in STAGE_TO_BRONZE_SOURCES.items():
+        if not sources:
+            continue  # e.g. categorias_municipalidades no tiene fuente bronze
+        if stage_name not in stage_map:
+            mismatches.append(f"{stage_name}: no registrado en stage manifest")
+            continue
+        current_total = _compute_bronze_total(bronze_map, sources)
+        recorded_total = stage_map[stage_name]
+        if current_total != recorded_total:
+            mismatches.append(
+                f"{stage_name}: bronze actual={current_total} vs stage registrado={recorded_total}"
+            )
+
+    if mismatches:
+        return False, "; ".join(mismatches)
+    return True, "Todos los conteos bronze coinciden con el stage manifest"

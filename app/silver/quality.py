@@ -8,7 +8,7 @@ from pyspark.sql import functions as F
 
 from app.settings.settings import settings
 from app.utils.logging import UnifiedLogger
-from app.utils.manifest import bronze_row_count_map, stage_entry, write_stage_manifest
+from app.utils.manifest import STAGE_TO_BRONZE_SOURCES, bronze_row_count_map, stage_entry, write_stage_manifest
 
 _logger = UnifiedLogger("SilverQuality", "silver")
 
@@ -361,20 +361,8 @@ def _write_stage_manifest():
     """Scan stage parquet files and write a manifest with row counts and bronze source totals."""
     bronze_map = bronze_row_count_map(_BRONZE / "manifest.parquet")
 
-    _STAGE_TO_BRONZE_SOURCES: dict[str, list[tuple[str, str]]] = {
-        "ingreso_unified": [("SIAF", y) for y in ("2021", "2022", "2023", "2024")],
-        "rentas_preguntas": [("SISMEPRE", "rentas_preguntas")],
-        "rentas_formulario": [("SISMEPRE", "rentas_formulario")],
-        "rentas_esat_estadistica_atm": [("SISMEPRE", "rentas_esat_estadistica_atm")],
-        "rentas_respuestas": [("SISMEPRE", "rentas_respuestas")],
-        "rentas_ano_aplicacion": [("SISMEPRE", "rentas_ano_aplicacion")],
-        "categorias_municipalidades": [],
-    }
-    for y in ("2021", "2022", "2023", "2024", "2025"):
-        _STAGE_TO_BRONZE_SOURCES[f"renamu_{y}"] = [("RENAMU", y if y != "2025" else "984-Modulo1963")]
-
     entries = []
-    for stage_name, bronze_sources in _STAGE_TO_BRONZE_SOURCES.items():
+    for stage_name, bronze_sources in STAGE_TO_BRONZE_SOURCES.items():
         stage_path = _STAGE / f"{stage_name}.parquet"
         if not stage_path.exists():
             continue

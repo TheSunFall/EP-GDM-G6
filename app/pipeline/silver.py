@@ -1,7 +1,7 @@
 from app.settings.settings import settings
 from app.silver import loader, quality, transforms
 from app.utils.logging import UnifiedLogger
-from app.utils.manifest import bronze_row_count_map, stage_bronze_row_count_total_map
+from app.utils.manifest import bronze_unchanged
 from app.utils.spark import SparkClient
 
 _STEP_ORDER = ["quality", "schema", "load"]
@@ -73,22 +73,16 @@ class SilverPipeline:
         if skip_unchanged and start_idx == 0:
             bronze_manifest_path = settings.project_root / settings.config.api.path / "manifest.parquet"
             stage_manifest_path = settings.project_root / settings.config.silver.path / "stage" / "manifest.parquet"
-            if bronze_manifest_path.exists() and stage_manifest_path.exists():
-                bronze_map = bronze_row_count_map(bronze_manifest_path)
-                stage_map = stage_bronze_row_count_total_map(stage_manifest_path)
-                bronze_total = sum(bronze_map.values())
-                stage_total = sum(stage_map.values())
-                if bronze_total == stage_total:
-                    self.logger.info(
-                        f"skip_unchanged: bronze total ({bronze_total}) == stage total ({stage_total}) "
-                        f"— datos sin cambios, omitiendo silver pipeline"
-                    )
-                    return
-                else:
-                    self.logger.info(
-                        f"skip_unchanged: bronze total ({bronze_total}) != stage total ({stage_total}) "
-                        f"— datos cambiados, ejecutando silver pipeline"
-                    )
+            unchanged, detail = bronze_unchanged(bronze_manifest_path, stage_manifest_path)
+            if unchanged:
+                self.logger.info(
+                    f"skip_unchanged: {detail} — datos sin cambios, omitiendo silver pipeline"
+                )
+                return
+            else:
+                self.logger.info(
+                    f"skip_unchanged: {detail} — datos cambiados, ejecutando silver pipeline"
+                )
 
         stage = None
         dims = None
