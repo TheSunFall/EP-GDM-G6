@@ -205,7 +205,7 @@ def build_mart_ingresos_ejecutora(
     dim_ubigeo: DataFrame,
 ) -> DataFrame:
     t = dim_tiempo.select("IdTiempo", "ANIO")
-    e = dim_ejecutora.select("IdEjecutora", "SEC_EJEC", "EJECUTORA_NOMBRE")
+    e = dim_ejecutora.select("IdEjecutora", "SEC_EJEC", "EJECUTORA_NOMBRE", "CATEGORIA")
     u = dim_ubigeo.select("IdUbigeo", "DEPARTAMENTO")
     return (
         fact_ingreso.join(F.broadcast(t), "IdTiempo")
@@ -216,6 +216,7 @@ def build_mart_ingresos_ejecutora(
             F.col("IdEjecutora"),
             F.col("SEC_EJEC").alias("SecEjec"),
             F.col("EJECUTORA_NOMBRE").alias("Ejecutora"),
+            F.coalesce(F.col("CATEGORIA"), F.lit("")).alias("Categoria"),
             F.col("DEPARTAMENTO").alias("Departamento"),
         )
         .agg(
@@ -227,7 +228,7 @@ def build_mart_ingresos_ejecutora(
             F.col("Anio").cast("smallint"),
             F.col("IdEjecutora").cast("int"),
             F.col("SecEjec").cast("int"),
-            "Ejecutora", "Departamento",
+            "Ejecutora", "Categoria", "Departamento",
             F.col("MontoPIA").cast("bigint"),
             F.col("MontoPIM").cast("bigint"),
             F.col("MontoRecaudado").cast("decimal(18,2)"),
@@ -245,7 +246,7 @@ def build_mart_predial(
 ) -> DataFrame:
     f = _read_partitioned(spark, url, props, "FACT_FORMULARIO_SISMEPRE", "IdEjecutora")
     aa = _read(spark, url, props, "DIM_ANIO_APLICACION").select("IdAnioAplicacion", "ANO_APLICACION")
-    e = dim_ejecutora.select("IdEjecutora", "SEC_EJEC", "EJECUTORA_NOMBRE")
+    e = dim_ejecutora.select("IdEjecutora", "SEC_EJEC", "EJECUTORA_NOMBRE", "CATEGORIA")
     fo = _read(spark, url, props, "DIM_FORMULARIO_SISMEPRE").select(
         F.col("IdFormSismepre").alias("IdFormulario"), F.col("TITULO")
     )
@@ -263,6 +264,7 @@ def build_mart_predial(
             F.col("IdEjecutora").cast("int"),
             F.col("SEC_EJEC").cast("int").alias("SecEjec"),
             F.col("EJECUTORA_NOMBRE").alias("Municipalidad"),
+            F.coalesce(F.col("CATEGORIA"), F.lit("")).alias("Categoria"),
             F.col("IdFormulario").cast("int"),
             F.col("TITULO").alias("FormularioTitulo"),
             F.col("IdPregunta").cast("int"),

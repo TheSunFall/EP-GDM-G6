@@ -187,82 +187,33 @@ def fix_renamu(spark: SparkSession, year: str) -> DataFrame:
     return _log_count(f"renamu_{year}", df)
 
 
-def _normalize_municipalidad():
-    """UDF que normaliza nombres de municipalidad a una clave común para join."""
-    import re
-    import unicodedata
-
-    PREFIXES = [
-        "MUNICIPALIDAD DISTRITAL DE ",
-        "MUNICIPALIDAD PROVINCIAL DE ",
-        "MUNICIPALIDAD METROPOLITANA DE ",
-        "MUNICIPALIDAD DISTRITAL DEL ",
-        "MUNICIPALIDAD PROVINCIAL DEL ",
-        "MUNICIPALIDAD DISTRITAL ",
-        "MUNICIPALIDAD PROVINCIAL ",
-        "MUNICIPALIDAD METROPOLITANA ",
-        "M. D. DE ",
-        "M. P. DE ",
-        "M. P. DEL ",
-        "M. D. DEL ",
-        "M. D . DE ",
-        "M. D . ",
-        "M.P. DE ",
-        "M. D. ",
-        "M. P. ",
-        "M.P. ",
-    ]
-
-    def _norm(name: str) -> str:
-        if not name:
-            return ""
-        n = unicodedata.normalize("NFKD", name.upper())
-        n = n.encode("ascii", "ignore").decode("ascii")
-        n = re.sub(r"\s*\([^)]*\)\s*", " ", n)
-        for prefix in PREFIXES:
-            if n.startswith(prefix):
-                n = n[len(prefix) :]
-                break
-        n = n.lower().strip()
-        n = re.sub(r"\bsta\.?\b", "santa", n)
-        n = re.sub(r"\bsto\.?\b", "santo", n)
-        n = re.sub(r"\bstgo\.?\b", "santiago", n)
-        n = re.sub(r"\bj\.?\b", "jose", n)
-        n = re.sub(r"\s*-\s*", "-", n)
-        n = re.sub(r"\s+", " ", n).strip()
-        return n
-
-    return F.udf(_norm, "string")
-
-
 def fix_categorias_municipalidades(
-    spark: SparkSession, esat_df: DataFrame
+    spark: SparkSession, esat_df: DataFrame, ingreso_df: DataFrame
 ) -> DataFrame:
-    csv_path = str(settings.project_root / "data" / "CategoriasMunicipalidades.csv")
-    categorias = (
-        spark.read.option("header", True)
-        .option("delimiter", ";")
-        .option("encoding", "UTF-8")
-        .csv(csv_path)
-    )
-    norm = _normalize_municipalidad()
-    esat_norm = esat_df.select(
-        "SEC_EJEC",
-        F.col("MUNICIPALIDAD_NOMBRE").alias("MUNICIPALIDAD_NOMBRE_ORIG"),
-        norm("MUNICIPALIDAD_NOMBRE").alias("_NORMALIZED"),
-    )
-    csv_norm = categorias.select(
-        F.col("Municipalidad").alias("MUNICIPALIDAD_ORIG"),
-        F.col("Categoria").alias("CATEGORIA"),
-        norm("Municipalidad").alias("_NORMALIZED"),
-    )
+    """Devuelve el puente SEC_EJEC -> CATEGORIA (A-G) leyendo el mapeo CURADO
+    ``data/categorias_secejec.csv``.
+
+    Ese mapeo se genera offline con ``tools/generar_categorias.py`` (normalización
+    de nombres + resolución de homónimos por ubigeo + coincidencia difusa +
+    overrides verificados a mano), logrando ~99.6% de cobertura SIN asignaciones
+    incorrectas. Aquí solo se carga -> determinístico y reproducible. Los
+    municipios sin categoría quedan con CATEGORIA='' (sin pérdida). ``esat_df`` e
+    ``ingreso_df`` se mantienen en la firma por compatibilidad con el orquestador.
+    """
+    csv_path = str(settings.project_root / "data" / "categorias_secejec.csv")
     joined = (
-        esat_norm.join(csv_norm, on="_NORMALIZED", how="inner")
-        .select("SEC_EJEC", "CATEGORIA")
+        spark.read.option("header", True).csv(csv_path)
+        .select(
+            F.col("SecEjec").cast("int").alias("SEC_EJEC"),
+            F.upper(F.trim(F.coalesce(F.col("Categoria"), F.lit("")))).alias("CATEGORIA"),
+        )
+        .filter(F.col("SEC_EJEC").isNotNull())
         .dropDuplicates(["SEC_EJEC"])
     )
+    etiquetadas = joined.filter(F.col("CATEGORIA") != "").count()
     _logger.info(
-        f"categorias_municipalidades: {joined.count()} ejecutoras mapeadas desde CategoriasMunicipalidades.csv"
+        f"categorias_municipalidades: {etiquetadas} ejecutoras etiquetadas "
+        f"(mapeo curado data/categorias_secejec.csv)"
     )
     return joined
 
@@ -312,26 +263,31 @@ def fix_all(spark: SparkSession) -> dict[str, DataFrame | list[DataFrame]]:
     respuestas_df = fix_rentas_respuestas(spark)
     ano_df = fix_rentas_ano_aplicacion(spark)
 
-    # Construir filtro de categorías municipales y filtrar datasets
-    _logger.info("Construyendo filtro de categorías municipales desde CategoriasMunicipalidades.csv")
-    categorias_df = fix_categorias_municipalidades(spark, esat_df)
+    # SIAF -> solo MUNICIPALIDADES (gobiernos locales municipales).
+    # 1) nivel de gobierno LOCAL (descarta Nacional/Regional).
+    # 2) el nombre debe contener "MUNICIPALIDAD" y NO "MANCOMUNIDAD" -> excluye
+    #    las mancomunidades municipales (asociaciones de municipios, no son
+    #    municipios individuales). Solo quedan las municipalidades distritales/
+    #    provinciales/metropolitanas.
+    _nombre_ejec = F.upper(F.coalesce(F.col("EJECUTORA_NOMBRE"), F.lit("")))
+    ingreso_df = ingreso_df.filter(
+        F.upper(F.coalesce(F.col("NIVEL_GOBIERNO_NOMBRE"), F.lit(""))).contains("LOCAL")
+        & _nombre_ejec.contains("MUNICIPALIDAD")
+        & ~_nombre_ejec.contains("MANCOMUNIDAD")
+    )
+    result["ingreso_unified"] = _save("ingreso_unified", ingreso_df)
+
+    # Etiquetado de categoría A-G (sin pérdida): puente SEC_EJEC -> CATEGORIA
+    # cruzando nombres de ESAT (SISMEPRE) y SIAF locales contra el CSV.
+    _logger.info("Etiquetando categorías municipales (A-G) desde CategoriasMunicipalidades.csv")
+    categorias_df = fix_categorias_municipalidades(spark, esat_df, ingreso_df)
     result["categorias_municipalidades"] = _save(
         "categorias_municipalidades", categorias_df
     )
 
-    valid_sec_ejec = categorias_df.select("SEC_EJEC").distinct()
-    n_valid = valid_sec_ejec.count()
-    _logger.info(f"Filtrando por {n_valid} ejecutoras válidas según CategoriasMunicipalidades.csv")
-
-    ingreso_df = ingreso_df.join(valid_sec_ejec, on="SEC_EJEC", how="inner")
-    result["ingreso_unified"] = _save("ingreso_unified", ingreso_df)
-
-    esat_df = esat_df.join(valid_sec_ejec, on="SEC_EJEC", how="inner")
+    # SISMEPRE y RENAMU ya son municipales -> NO se filtran filas (sin pérdida).
     result["rentas_esat"] = _save("rentas_esat_estadistica_atm", esat_df)
-
-    respuestas_df = respuestas_df.join(valid_sec_ejec, on="SEC_EJEC", how="inner")
     result["rentas_respuestas"] = _save("rentas_respuestas", respuestas_df)
-
     result["rentas_preguntas"] = _save("rentas_preguntas", preguntas_df)
     result["rentas_formulario"] = _save("rentas_formulario", formulario_df)
     result["rentas_ano_aplicacion"] = _save("rentas_ano_aplicacion", ano_df)
