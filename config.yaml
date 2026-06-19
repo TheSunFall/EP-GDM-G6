@@ -1,12 +1,6 @@
 silver:
   path: "data/silver"
   profiling_path: "data/profiling"
-  database:
-    host: "localhost"
-    port: 11423
-    database: "test3"
-    dbschema: "silver"
-    user: "sa"
 
 logs:
   path: "logs"

@@ -1,0 +1,359 @@
+================================================================================
+GUÍA DE EJECUCIÓN: EP-GDM-G6 (Medallion Data Lakehouse - Perú)
+================================================================================
+
+Este documento describe cómo ejecutar el proyecto desde la instalación de
+librerías con uv hasta los Jupyter notebooks.
+
+================================================================================
+REQUISITOS PREVIOS
+================================================================================
+
+1. Python 3.12 o superior
+   - Verifica: python --version
+
+2. uv (package manager de Python)
+   - Instala desde: https://docs.astral.sh/uv/getting-started/installation/
+   - Verifica: uv --version
+
+3. Java 17 o 21 (CRÍTICO - versiones más altas rompen PySpark)
+   - Descarga desde: https://www.oracle.com/java/technologies/downloads/
+   - Verifica: java -version
+   - Establece JAVA_HOME en variables de entorno:
+     Windows:
+       setx JAVA_HOME "C:\Program Files\Java\jdk-21.0.x"
+       (reinicia la terminal después)
+
+4. Visual Studio Code (opcional, pero recomendado para notebooks)
+   - Instala la extensión "Jupyter" desde VS Code
+
+================================================================================
+PASO 1: INSTALAR DEPENDENCIAS CON UV
+================================================================================
+
+Desde el directorio raíz del proyecto (c:\Users\user\Downloads\EP-GDM-G6):
+
+  uv sync
+
+Esto creará un entorno virtual en .venv/ e instalará todas las dependencias
+especificadas en pyproject.toml:
+  - PySpark 4.1
+  - PyArrow
+  - Pandas
+  - pypdf (para procesamiento de PDFs)
+  - Y otras librerías necesarias
+
+Espera a que termine completamente. Verás un mensaje como:
+  "Resolved N dependencies"
+
+================================================================================
+PASO 2: ACTIVAR EL ENTORNO VIRTUAL
+================================================================================
+
+PowerShell (recomendado en Windows):
+  & .\.venv\Scripts\Activate.ps1
+
+CMD:
+  .venv\Scripts\activate.bat
+
+Bash/Git Bash:
+  source .venv/Scripts/activate
+
+Deberías ver (.venv) al inicio de tu prompt en la terminal.
+
+================================================================================
+PASO 3: EJECUTAR EL PIPELINE (opciones principales)
+================================================================================
+
+Desde el directorio raíz con el entorno activado:
+
+A) Ejecutar TODO el pipeline de inicio a fin con UN SOLO comando
+   (bronze → profile → silver [método C] → gold → powerbi):
+   python main.py
+
+   - Silver usa por defecto --municipios drop ("método C").
+   - Cada etapa se reconstruye con drop=True (idempotente, desde cero).
+   - Incluye la exportación final a Power BI (data/powerbi/).
+
+B) Ejecutar solo BRONZE (descargar y convertir a parquet):
+   python main.py bronze
+
+C) Ejecutar solo PROFILING (evaluación de calidad):
+   python main.py profile
+
+D) Ejecutar solo SILVER (calidad + star schema):
+   python main.py silver
+
+   Opciones adicionales para silver:
+   - python main.py silver --drop
+     (Recrea data/silver/ desde cero, eliminando archivos anteriores)
+
+   - python main.py silver --skip-unchanged
+     (Omite si los conteos de filas de bronze no cambiaron desde la última vez)
+
+   - python main.py silver quality | schema | load
+     (Ejecuta un paso específico de silver)
+
+   Estrategia de categorías y deduplicación de municipios (--municipios):
+   Las tres opciones controlan cómo se construye DIM_EJECUTORA y las tablas
+   de hechos respecto a municipios homónimos (ej: 14 "Santa Rosa" distintas).
+
+   - python main.py silver --municipios drop   [POR DEFECTO, "método C"]
+     Categorías simplificadas: Lima = C, resto = G.
+     Una sola fila por nombre de municipio (la del menor SEC_EJEC).
+     Los hechos de los SEC_EJEC no canónicos NO aparecen en FACT_INGRESO
+     ni FACT_FORMULARIO_SISMEPRE (pérdida de datos de municipios homónimos).
+
+   - python main.py silver --municipios legacy
+     Categorías A-G según Anexo IV DS 003-2026-EF (cruce por ubigeo).
+     Clave de dimensión: SEC_EJEC → una fila por código, sin dedup por nombre.
+
+   - python main.py silver --municipios remap
+     Categorías simplificadas: Lima = C, resto = G.
+     Una sola fila por nombre de municipio (la del menor SEC_EJEC).
+     Todos los SEC_EJEC homónimos son reasignados al canónico en FACT_INGRESO
+     y FACT_FORMULARIO_SISMEPRE → montos acumulados completos, sin pérdida.
+
+   Se pueden combinar con --drop o --skip-unchanged:
+   - python main.py silver --drop --municipios remap
+   - python main.py silver --skip-unchanged --municipios drop
+
+E) Ejecutar solo GOLD (marts de negocio):
+   python main.py gold
+   python main.py gold --drop
+     (Recrea data/gold/ desde cero)
+
+F) Ejecutar generación de .parquet para Power BI:
+   python main.py powerbi
+   python main.py powerbi --drop(recrea desde cero)
+
+TIEMPOS APROXIMADOS (primera ejecución):
+  - bronze: 2-5 minutos (descarga de MEF e INEI)
+  - profile: 3-8 minutos (cálculo de 8 criterios de calidad)
+  - silver: 5-15 minutos (transformaciones y star schema)
+  - gold: 5-20 minutos (construcción de marts)
+
+SALIDA:
+  - Bronze: parquet en data/bronze/
+  - Profiling: reportes HTML/JSON en data/profiling/
+  - Silver: parquet transformado en data/silver/
+  - Gold: marts de BI en data/gold/
+  - Logs: data/logs/ (gitignored)
+
+================================================================================
+PASO 4: EJECUTAR LOS JUPYTER NOTEBOOKS
+================================================================================
+
+Los notebooks están en notebooks/ y corren TODO el pipeline desde Jupyter:
+
+01_run_bronze.ipynb
+  → Descarga datos y crea bronze
+
+02_run_profiling.ipynb
+  → Genera reportes de calidad
+
+03_explore_bronze.ipynb
+  → Explora los datos crudos
+
+04_run_silver.ipynb
+  → Ejecuta transformaciones silver
+
+05_explore_silver.ipynb
+  → Explora la star schema
+
+06_run_gold.ipynb
+  → Construye los marts
+
+07_explore_gold.ipynb
+  → Explora los marts
+
+08_consultas_finales.ipynb
+  → Consultas de ejemplo y KPIs
+
+09_run_powerbi.ipynb
+  → Exporta los marts gold a parquet único para Power BI (data/powerbi/)
+    Equivale a `python main.py powerbi --drop`. Requiere haber corrido gold.
+
+CÓMO EJECUTAR UN NOTEBOOK:
+
+En VS Code:
+  1. Abre el archivo .ipynb (ej: notebooks/01_run_bronze.ipynb)
+  2. En la esquina superior derecha, selecciona kernel: "Python ([kernel name])"
+  3. Ejecuta cada celda con Shift+Enter o usa "Run All"
+
+Alternativa con línea de comandos (jupyter):
+  jupyter notebook notebooks/01_run_bronze.ipynb
+
+NOTA IMPORTANTE - Celda Bootstrap:
+  Cada notebook comienza con una celda de bootstrap que:
+  - Restaura las rutas correctas de Java y Hadoop para Windows
+  - Cambia al directorio raíz del proyecto
+  - Configura variables de entorno necesarias
+  
+  SIEMPRE ejecuta primero esta celda antes de las demás.
+
+================================================================================
+PASO 5: INSPECCIONAR LOS RESULTADOS
+================================================================================
+
+Python (interactivo):
+  En tu terminal activada, ejecuta:
+  python
+  
+  Luego:
+  import pyarrow.parquet as pq
+  df = pq.read_table('data/silver/DIM_EJECUTORA.parquet').to_pandas()
+  print(df.head())
+
+Pandas/PyArrow:
+  Crea un script Python simple:
+  
+  import pyarrow.parquet as pq
+  
+  # Lee el parquet
+  df = pq.read_table('data/gold/MART_INGRESOS.parquet').to_pandas()
+  print(f"Filas: {len(df)}")
+  print(df.head())
+
+Power BI:
+  Los marts en data/gold/ pueden conectarse directamente a Power BI.
+  Usa "Get Data" → "Other" → "Folder" → selecciona data/gold/
+
+================================================================================
+ESTRUCTURA DE DIRECTORIOS DE SALIDA
+================================================================================
+
+Después de ejecutar, encontrarás:
+
+data/
+  bronze/               ← Datos descargados (parquet comprimido)
+    dicts/              ← Diccionarios de datos
+  silver/               ← Star schema transformada (15 dims + 3 facts)
+  gold/                 ← Marts de BI (3 dims + 5 marts)
+  profiling/            ← Reportes HTML/JSON de calidad
+  categorias_*.csv      ← Mappeos de categorías municipales
+
+logs/                   ← Archivos de log (gitignored)
+
+================================================================================
+SOLUCIÓN DE PROBLEMAS
+================================================================================
+
+Error: "Java not found" o "JAVA_HOME not set"
+  → Instala Java 17 o 21 y establece JAVA_HOME en variables de entorno
+  → En PowerShell: $env:JAVA_HOME
+  → En CMD: echo %JAVA_HOME%
+
+Error: "Python 3.11 or lower detected"
+  → Necesitas Python 3.12+. Actualiza desde python.org
+
+Error: "PySpark worker exited unexpectedly"
+  → Esto ocurre si usas Python UDFs en Spark en Windows.
+    (El proyecto usa solo funciones nativas, no debería pasar)
+
+Error: "uv: command not found"
+  → uv no está instalado o no está en PATH
+  → Reinstala desde https://docs.astral.sh/uv/
+
+Parquet no se lee correctamente:
+  → Asegúrate de usar PyArrow, no pandas.read_parquet()
+  → import pyarrow.parquet as pq
+  → pq.read_table('ruta/archivo.parquet')
+
+Los notebooks usan JAVA_HOME incorrecto (Linux):
+  → NORMAL en Windows. La celda bootstrap lo arregla automáticamente.
+
+================================================================================
+COMANDOS RÁPIDOS RESUMEN
+================================================================================
+
+# Primera vez: instalar todo
+uv sync
+
+# Activar entorno
+& .\.venv\Scripts\Activate.ps1
+
+# Ejecutar pipeline completo de inicio a fin con un solo comando
+# (bronze → profile → silver [método C] → gold → powerbi)
+python main.py
+
+# Solo bronze
+python main.py bronze
+
+# Solo silver — método C POR DEFECTO (Lima=C/G, dedup por nombre, pierde no canónicos)
+python main.py silver --drop
+
+# Solo silver — comportamiento legacy (categorías A-G, una fila por SEC_EJEC)
+python main.py silver --drop --municipios legacy
+
+# Solo silver — Lima=C/G, dedup por nombre, SIN pérdida de montos
+python main.py silver --drop --municipios remap
+
+# ── RECONSTRUIR DESDE SILVER EN ADELANTE ────────────────────────────────────
+# (bronze y profile ya existen; solo regenerar silver, gold y powerbi)
+
+# Opción A — comportamiento legacy (ahora hay que pedirlo explícito)
+python main.py silver --drop --municipios legacy
+python main.py gold --drop
+python main.py powerbi --drop
+
+# Opción B — nueva lógica Lima=C/G, sin pérdida (remap)
+python main.py silver --drop --municipios remap
+python main.py gold --drop
+python main.py powerbi --drop
+
+# Opción C — nueva lógica Lima=C/G, con pérdida (drop)
+python main.py silver --drop --municipios drop
+python main.py gold --drop
+python main.py powerbi --drop
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Solo gold
+python main.py gold --drop
+
+# Solo powerbi (exportar marts para Power BI)
+python main.py powerbi --drop
+
+# Abrir un notebook en Jupyter
+jupyter notebook notebooks/01_run_bronze.ipynb
+
+# Inspeccionar parquet desde Python
+python -c "import pyarrow.parquet as pq; print(pq.read_table('data/silver/DIM_EJECUTORA.parquet').to_pandas().head())"
+
+================================================================================
+CONFIGURACIÓN (config.yaml)
+================================================================================
+
+El archivo config.yaml define:
+  - Los 3 datasets (SIAF, SISMEPRE, RENAMU)
+  - Las rutas de salida (data/bronze/, data/silver/, data/gold/)
+  - Parámetros de calidad del profiler
+
+NO requiere configuración de base de datos (todo es parquet local).
+
+================================================================================
+ARCHIVOS IMPORTANTES
+================================================================================
+
+main.py                ← Punto de entrada (argparse)
+config.yaml            ← Configuración de datasets y rutas
+app/pipeline/          ← Pipelines (bronze, profile, silver, gold)
+app/settings/          ← Carga de configuración
+notebooks/             ← Jupyter para ejecutar todo desde interfaz gráfica
+AGENTS.md              ← Comandos y arquitectura
+CLAUDE.md              ← Guía para Claude AI
+PLAN_PARQUET.md        ← Detalles de la migración SQL → Parquet
+
+================================================================================
+NOTAS FINALES
+================================================================================
+
+• El proyecto es 100% parquet, NO usa SQL Server ni Docker
+• Todo se ejecuta localmente en tu máquina
+• Los notebooks incluyen bootstrap cells que arreglan problemas de PATH en Windows
+• No hay tests, linting ni CI configurados
+• Lenguaje: todo el código en inglés, la documentación en español
+
+Para preguntas sobre la arquitectura, ver AGENTS.md y CLAUDE.md
+
+================================================================================

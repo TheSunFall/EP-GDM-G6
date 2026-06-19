@@ -1,13 +1,15 @@
-import pyarrow.parquet as pq
+from pyspark.sql import SparkSession
 
 from app.client.mef_client import MefClient
 from app.settings.settings import settings
 from app.utils.logging import UnifiedLogger
 from app.utils.manifest import bronze_entry, write_bronze_manifest
+from app.utils.spark import SparkClient
 
 
 class BronzePipeline:
-    def __init__(self):
+    def __init__(self, spark_client: SparkClient):
+        self.spark: SparkSession = spark_client.get_session()
         self.logger = UnifiedLogger("BronzePipeline", "bronze")
 
     def run(self):
@@ -18,7 +20,7 @@ class BronzePipeline:
 
         for dataset in settings.config.datasets:
             self.logger.info(f"Descargando dataset: {dataset.name}")
-            client = MefClient(fs_url=dataset.url)
+            client = MefClient(spark=self.spark, fs_url=dataset.url)
             try:
                 if dataset.name == "SIAF":
                     self.logger.info("Usando esquema global para SIAF")
@@ -41,18 +43,29 @@ class BronzePipeline:
                 if f.name in seen_files:
                     continue
                 seen_files.add(f.name)
-                pf = pq.ParquetFile(f)
-                row_count = pf.metadata.num_rows
-                file_size = f.stat().st_size
-                module_name = f.name[len(prefix) : -len(".parquet")]
+
+                # PySpark cuenta filas (soporta directorios Spark y archivos únicos)
+                row_count = self.spark.read.parquet(str(f)).count()
+
+                # Tamaño: suma de part-files si es directorio Spark, stat() si es archivo
+                if f.is_dir():
+                    file_size = sum(p.stat().st_size for p in f.glob("part-*.parquet"))
+                else:
+                    file_size = f.stat().st_size
+
+                module_name = f.name[len(prefix): -len(".parquet")]
                 manifest_entries.append(
                     bronze_entry(dataset.name, module_name, row_count, file_size)
                 )
-                self.logger.info(f"Bronze manifest: {f.name} → {row_count} filas, {file_size} bytes")
+                self.logger.info(
+                    f"Bronze manifest: {f.name} -> {row_count} filas, {file_size} bytes"
+                )
 
         if manifest_entries:
             manifest_path = api_path / "manifest.parquet"
-            write_bronze_manifest(manifest_entries, manifest_path)
-            self.logger.info(f"Bronze manifest escrito: {manifest_path} ({len(manifest_entries)} entradas)")
+            write_bronze_manifest(manifest_entries, manifest_path, self.spark)
+            self.logger.info(
+                f"Bronze manifest escrito: {manifest_path} ({len(manifest_entries)} entradas)"
+            )
 
         self.logger.info("Bronze Pipeline completado")

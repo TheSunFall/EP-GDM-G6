@@ -1,9 +1,10 @@
 """Transformaciones de la capa Gold con PySpark.
 
-Lee las tablas silver por JDBC y construye las dimensiones de presentacion y los
-marts de negocio como DataFrames. Los joins hecho->dimension son por surrogate key
-(Id*), que es unica en cada dimension, por lo que no hay fan-out.
+Lee las tablas silver desde parquet y construye las dimensiones de presentacion y los
+marts de negocio como DataFrames.
 """
+
+from pathlib import Path
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
@@ -13,58 +14,27 @@ from app.utils.logging import UnifiedLogger
 _logger = UnifiedLogger("GoldTransforms", "gold")
 
 
-def _read(spark: SparkSession, url: str, props: dict, table: str) -> DataFrame:
-    return spark.read.jdbc(url=url, table=f"silver.{table}", properties=props)
+def _read_parquet(spark: SparkSession, table: str, silver_dir: Path) -> DataFrame:
+    path = silver_dir / f"{table}.parquet"
+    return spark.read.parquet(str(path))
 
 
-def _read_partitioned(
+def _read_partitioned_parquet(
     spark: SparkSession,
-    url: str,
-    props: dict,
     table: str,
+    silver_dir: Path,
     partition_column: str,
     num_partitions: int = 16,
 ) -> DataFrame:
-    """Lee una tabla grande por JDBC con lectura paralela en múltiples particiones.
-
-    Sin particionamiento, spark.read.jdbc usa UNA sola conexión JDBC y crea UN solo
-    partition, lo que significa que millones de filas se leen secuencialmente en un
-    solo hilo. Esto es el cuello de botella principal para FACT_RENAMU (~12M filas)
-    y FACT_FORMULARIO_SISMEPRE.
-    """
-    full_table = f"silver.{table}"
-    bounds = spark.read.jdbc(url=url, table=full_table, properties=props).agg(
-        F.min(partition_column).alias("lo"),
-        F.max(partition_column).alias("hi"),
-    ).collect()[0]
-
-    lo, hi = int(bounds["lo"]), int(bounds["hi"])
-    _logger.info(
-        f"Leyendo {full_table} particionado por {partition_column} "
-        f"[{lo}, {hi}] en {num_partitions} particiones"
-    )
-    return spark.read.jdbc(
-        url=url,
-        table=full_table,
-        column=partition_column,
-        lowerBound=lo,
-        upperBound=hi + 1,
-        numPartitions=num_partitions,
-        properties=props,
-    )
+    df = _read_parquet(spark, table, silver_dir)
+    return df.repartition(num_partitions, partition_column)
 
 
 # ── Dimensiones de presentacion ─────────────────────────────────────────────
 
-def build_dim_calendario(spark: SparkSession, url: str, props: dict) -> DataFrame:
-    """Calendario contiguo (sin huecos) entre el min y max anio de silver.DIM_TIEMPO.
 
-    Implementado en Spark SQL puro (sequence/explode/make_date) para no requerir
-    workers de Python (evita crashes del worker en Windows).
-    """
-    dt = _read(spark, url, props, "DIM_TIEMPO").filter(
-        (F.col("ANIO") >= 2000) & (F.col("ANIO") <= 2100)
-    )
+def build_dim_calendario(spark: SparkSession, dim_tiempo: DataFrame) -> DataFrame:
+    dt = dim_tiempo.filter((F.col("ANIO") >= 2000) & (F.col("ANIO") <= 2100))
     b = dt.agg(F.min("ANIO").alias("mn"), F.max("ANIO").alias("mx")).collect()[0]
     mn, mx = int(b["mn"]), int(b["mx"])
 
@@ -85,18 +55,17 @@ def build_dim_calendario(spark: SparkSession, url: str, props: dict) -> DataFram
     )
 
 
-def build_dim_anio(spark: SparkSession, url: str, props: dict) -> DataFrame:
+def build_dim_anio(spark: SparkSession, dim_tiempo: DataFrame) -> DataFrame:
     return (
-        _read(spark, url, props, "DIM_TIEMPO")
+        dim_tiempo
         .filter((F.col("ANIO") >= 2000) & (F.col("ANIO") <= 2100))
         .select(F.col("ANIO").cast("smallint").alias("Anio"))
         .distinct()
     )
 
 
-def build_dim_geografia(spark: SparkSession, url: str, props: dict) -> DataFrame:
-    u = _read(spark, url, props, "DIM_UBIGEO")
-    return u.select(
+def build_dim_geografia(spark: SparkSession, dim_ubigeo: DataFrame) -> DataFrame:
+    return dim_ubigeo.select(
         F.col("IdUbigeo"),
         F.col("CODIGODEPARTAMENTO").alias("CodigoDepartamento"),
         F.col("DEPARTAMENTO").alias("Departamento"),
@@ -114,17 +83,19 @@ def build_dim_geografia(spark: SparkSession, url: str, props: dict) -> DataFrame
 
 # ── Marts SIAF (ingresos) ───────────────────────────────────────────────────
 
+
 def _pct(rec, pim):
     return F.col(rec).cast("double") / F.when(F.col(pim) == 0, None).otherwise(F.col(pim))
 
 
 def build_mart_ingresos_geografico(
-    spark: SparkSession, url: str, props: dict,
-    fact_ingreso: DataFrame, dim_tiempo: DataFrame, dim_ubigeo: DataFrame,
+    spark: SparkSession,
+    fact_ingreso: DataFrame,
+    dim_tiempo: DataFrame,
+    dim_ubigeo: DataFrame,
+    dim_nivel_gobierno: DataFrame,
 ) -> DataFrame:
-    ng = _read(spark, url, props, "DIM_NIVEL_GOBIERNO").select(
-        "IdNivelGobierno", "NIVEL_GOBIERNO_NOMBRE"
-    )
+    ng = dim_nivel_gobierno.select("IdNivelGobierno", "NIVEL_GOBIERNO_NOMBRE")
     t = dim_tiempo.select("IdTiempo", "ANIO", "MES")
     u = dim_ubigeo.select("IdUbigeo", "DEPARTAMENTO", "PROVINCIA", "DISTRITO")
     return (
@@ -163,13 +134,17 @@ def build_mart_ingresos_geografico(
 
 
 def build_mart_ingresos_clasificador(
-    spark: SparkSession, url: str, props: dict,
-    fact_ingreso: DataFrame, dim_tiempo: DataFrame,
+    spark: SparkSession,
+    fact_ingreso: DataFrame,
+    dim_tiempo: DataFrame,
+    dim_rubro: DataFrame,
+    dim_tipo_recurso: DataFrame,
+    dim_generica: DataFrame,
 ) -> DataFrame:
     t = dim_tiempo.select("IdTiempo", "ANIO")
-    r = _read(spark, url, props, "DIM_RUBRO").select("IdRubro", "RUBRO_NOMBRE")
-    tr = _read(spark, url, props, "DIM_TIPO_RECURSO").select("IdTipoRecurso", "TIPO_RECURSO_NOMBRE")
-    g = _read(spark, url, props, "DIM_GENERICA").select("IdGenerica", "GENERICA_NOMBRE", "SUBGENERICA_NOMBRE")
+    r = dim_rubro.select("IdRubro", "RUBRO_NOMBRE")
+    tr = dim_tipo_recurso.select("IdTipoRecurso", "TIPO_RECURSO_NOMBRE")
+    g = dim_generica.select("IdGenerica", "GENERICA_NOMBRE", "SUBGENERICA_NOMBRE")
     return (
         fact_ingreso.join(F.broadcast(t), "IdTiempo")
         .join(F.broadcast(r), "IdRubro")
@@ -200,12 +175,14 @@ def build_mart_ingresos_clasificador(
 
 
 def build_mart_ingresos_ejecutora(
-    spark: SparkSession, url: str, props: dict,
-    fact_ingreso: DataFrame, dim_tiempo: DataFrame, dim_ejecutora: DataFrame,
+    spark: SparkSession,
+    fact_ingreso: DataFrame,
+    dim_tiempo: DataFrame,
+    dim_ejecutora: DataFrame,
     dim_ubigeo: DataFrame,
 ) -> DataFrame:
     t = dim_tiempo.select("IdTiempo", "ANIO")
-    e = dim_ejecutora.select("IdEjecutora", "SEC_EJEC", "EJECUTORA_NOMBRE")
+    e = dim_ejecutora.select("IdEjecutora", "SEC_EJEC", "EJECUTORA_NOMBRE", "CATEGORIA")
     u = dim_ubigeo.select("IdUbigeo", "DEPARTAMENTO")
     return (
         fact_ingreso.join(F.broadcast(t), "IdTiempo")
@@ -216,6 +193,7 @@ def build_mart_ingresos_ejecutora(
             F.col("IdEjecutora"),
             F.col("SEC_EJEC").alias("SecEjec"),
             F.col("EJECUTORA_NOMBRE").alias("Ejecutora"),
+            F.coalesce(F.col("CATEGORIA"), F.lit("")).alias("Categoria"),
             F.col("DEPARTAMENTO").alias("Departamento"),
         )
         .agg(
@@ -227,7 +205,7 @@ def build_mart_ingresos_ejecutora(
             F.col("Anio").cast("smallint"),
             F.col("IdEjecutora").cast("int"),
             F.col("SecEjec").cast("int"),
-            "Ejecutora", "Departamento",
+            "Ejecutora", "Categoria", "Departamento",
             F.col("MontoPIA").cast("bigint"),
             F.col("MontoPIM").cast("bigint"),
             F.col("MontoRecaudado").cast("decimal(18,2)"),
@@ -237,23 +215,27 @@ def build_mart_ingresos_ejecutora(
     )
 
 
-# ── Mart SISMEPRE (predial) - tall ──────────────────────────────────────────
+# ── Mart SISMEPRE (predial) ─────────────────────────────────────────────────
+
 
 def build_mart_predial(
-    spark: SparkSession, url: str, props: dict,
+    spark: SparkSession,
+    fact_formulario_sismepre: DataFrame,
     dim_ejecutora: DataFrame,
+    dim_anio_aplicacion: DataFrame,
+    dim_formulario_sismepre: DataFrame,
+    dim_pregunta_sismepre: DataFrame,
 ) -> DataFrame:
-    f = _read_partitioned(spark, url, props, "FACT_FORMULARIO_SISMEPRE", "IdEjecutora")
-    aa = _read(spark, url, props, "DIM_ANIO_APLICACION").select("IdAnioAplicacion", "ANO_APLICACION")
-    e = dim_ejecutora.select("IdEjecutora", "SEC_EJEC", "EJECUTORA_NOMBRE")
-    fo = _read(spark, url, props, "DIM_FORMULARIO_SISMEPRE").select(
+    aa = dim_anio_aplicacion.select("IdAnioAplicacion", "ANO_APLICACION")
+    e = dim_ejecutora.select("IdEjecutora", "SEC_EJEC", "EJECUTORA_NOMBRE", "CATEGORIA")
+    fo = dim_formulario_sismepre.select(
         F.col("IdFormSismepre").alias("IdFormulario"), F.col("TITULO")
     )
-    p = _read(spark, url, props, "DIM_PREGUNTA_SISMEPRE").select(
+    p = dim_pregunta_sismepre.select(
         F.col("IdPreguntaSismepre").alias("IdPregunta"), F.col("DESCRIPCION")
     )
     return (
-        f.join(F.broadcast(aa), "IdAnioAplicacion")
+        fact_formulario_sismepre.join(F.broadcast(aa), "IdAnioAplicacion")
         .join(F.broadcast(e), "IdEjecutora")
         .join(F.broadcast(fo), "IdFormulario")
         .join(F.broadcast(p), "IdPregunta")
@@ -263,6 +245,7 @@ def build_mart_predial(
             F.col("IdEjecutora").cast("int"),
             F.col("SEC_EJEC").cast("int").alias("SecEjec"),
             F.col("EJECUTORA_NOMBRE").alias("Municipalidad"),
+            F.coalesce(F.col("CATEGORIA"), F.lit("")).alias("Categoria"),
             F.col("IdFormulario").cast("int"),
             F.col("TITULO").alias("FormularioTitulo"),
             F.col("IdPregunta").cast("int"),
@@ -280,15 +263,17 @@ def build_mart_predial(
     )
 
 
-# ── Mart RENAMU (indicadores municipales) - tall, resuelve factless ─────────
+# ── Mart RENAMU (indicadores municipales) ───────────────────────────────────
+
 
 def build_mart_renamu(
-    spark: SparkSession, url: str, props: dict,
+    spark: SparkSession,
+    fact_renamu: DataFrame,
     dim_ubigeo: DataFrame,
+    dim_pregunta_renamu: DataFrame,
 ) -> DataFrame:
-    f = _read_partitioned(spark, url, props, "FACT_RENAMU", "IdPregunta")
     u = dim_ubigeo.select("IdUbigeo", "DEPARTAMENTO", "PROVINCIA", "DISTRITO")
-    p = _read(spark, url, props, "DIM_PREGUNTA_RENAMU").select("IdPregunta", "NOMBRE_CAMPO", "DESCRIPCION", "VALOR")
+    p = dim_pregunta_renamu.select("IdPregunta", "NOMBRE_CAMPO", "DESCRIPCION", "VALOR")
 
     valor_num = F.expr("try_cast(VALOR as decimal(18,2))")
     es_afirm = F.coalesce(
@@ -297,7 +282,7 @@ def build_mart_renamu(
         F.lit(False),
     )
     return (
-        f.join(F.broadcast(u), "IdUbigeo")
+        fact_renamu.join(F.broadcast(u), "IdUbigeo")
         .join(F.broadcast(p), "IdPregunta")
         .select(
             F.col("IdTiempo").cast("smallint").alias("Anio"),
@@ -318,49 +303,62 @@ def build_mart_renamu(
 
 # ── Orquestador ─────────────────────────────────────────────────────────────
 
+
 def build_all(
-    spark: SparkSession, url: str, props: dict
-) -> tuple[dict[str, DataFrame], list[DataFrame]]:
-    """Devuelve ({nombre_tabla_gold: DataFrame}, [cached_dfs]) en orden de carga.
+    spark: SparkSession,
+    silver_dir: Path = Path("data/silver"),
+) -> tuple[dict[str, DataFrame], dict[str, DataFrame]]:
+    _logger.info("Leyendo silver parquets")
+    dim_tiempo = _read_parquet(spark, "DIM_TIEMPO", silver_dir).cache()
+    dim_ubigeo = _read_parquet(spark, "DIM_UBIGEO", silver_dir).cache()
+    dim_ejecutora = _read_parquet(spark, "DIM_EJECUTORA", silver_dir).cache()
+    dim_nivel_gobierno = _read_parquet(spark, "DIM_NIVEL_GOBIERNO", silver_dir).cache()
+    dim_rubro = _read_parquet(spark, "DIM_RUBRO", silver_dir).cache()
+    dim_tipo_recurso = _read_parquet(spark, "DIM_TIPO_RECURSO", silver_dir).cache()
+    dim_generica = _read_parquet(spark, "DIM_GENERICA", silver_dir).cache()
+    dim_anio_aplicacion = _read_parquet(spark, "DIM_ANIO_APLICACION", silver_dir).cache()
+    dim_formulario_sismepre = _read_parquet(spark, "DIM_FORMULARIO_SISMEPRE", silver_dir).cache()
+    dim_pregunta_sismepre = _read_parquet(spark, "DIM_PREGUNTA_SISMEPRE", silver_dir).cache()
+    dim_pregunta_renamu = _read_parquet(spark, "DIM_PREGUNTA_RENAMU", silver_dir).cache()
 
-    Las dimensiones compartidas (UBIGEO, EJECUTORA, TIEMPO) se leen UNA sola vez
-    y se cachean para evitar lecturas JDBC redundantes entre marts.
-    Las tablas de hechos grandes se leen con lectura JDBC particionada.
-
-    Devuelve la lista de DataFrames cacheados para que el llamador los libere
-    tras completar las escrituras (los DataFrames son lazy y necesitan el cache
-    vivo durante la materialización).
-    """
-    # Dimensiones compartidas: leer una vez, cachear
-    _logger.info("Leyendo y cacheando dimensiones compartidas de silver")
-    dim_tiempo = _read(spark, url, props, "DIM_TIEMPO").cache()
-    dim_ubigeo = _read(spark, url, props, "DIM_UBIGEO").cache()
-    dim_ejecutora = _read(spark, url, props, "DIM_EJECUTORA").cache()
-
-    # Hecho compartido: FACT_INGRESO lo usan 3 marts SIAF
-    _logger.info("Leyendo FACT_INGRESO con lectura particionada")
-    fact_ingreso = _read_partitioned(
-        spark, url, props, "FACT_INGRESO", "IdTiempo"
+    _logger.info("Leyendo fact tables de silver")
+    fact_ingreso = _read_partitioned_parquet(spark, "FACT_INGRESO", silver_dir, "IdTiempo").cache()
+    fact_formulario_sismepre = _read_partitioned_parquet(
+        spark, "FACT_FORMULARIO_SISMEPRE", silver_dir, "IdEjecutora"
     ).cache()
+    fact_renamu = _read_partitioned_parquet(spark, "FACT_RENAMU", silver_dir, "IdPregunta").cache()
 
-    cached = [fact_ingreso, dim_tiempo, dim_ubigeo, dim_ejecutora]
+    cached = [
+        fact_ingreso, fact_formulario_sismepre, fact_renamu,
+        dim_tiempo, dim_ubigeo, dim_ejecutora, dim_nivel_gobierno,
+        dim_rubro, dim_tipo_recurso, dim_generica, dim_anio_aplicacion,
+        dim_formulario_sismepre, dim_pregunta_sismepre, dim_pregunta_renamu,
+    ]
 
-    tables = {
-        "DIM_CALENDARIO": build_dim_calendario(spark, url, props),
-        "DIM_ANIO": build_dim_anio(spark, url, props),
-        "DIM_GEOGRAFIA": build_dim_geografia(spark, url, props),
-        "MART_INGRESOS_GEOGRAFICO": build_mart_ingresos_geografico(
-            spark, url, props, fact_ingreso, dim_tiempo, dim_ubigeo,
-        ),
-        "MART_INGRESOS_CLASIFICADOR": build_mart_ingresos_clasificador(
-            spark, url, props, fact_ingreso, dim_tiempo,
-        ),
-        "MART_INGRESOS_EJECUTORA": build_mart_ingresos_ejecutora(
-            spark, url, props, fact_ingreso, dim_tiempo, dim_ejecutora, dim_ubigeo,
-        ),
-        "MART_PREDIAL": build_mart_predial(spark, url, props, dim_ejecutora),
-        "MART_RENAMU": build_mart_renamu(spark, url, props, dim_ubigeo),
+    dims = {
+        "DIM_CALENDARIO": build_dim_calendario(spark, dim_tiempo),
+        "DIM_ANIO": build_dim_anio(spark, dim_tiempo),
+        "DIM_GEOGRAFIA": build_dim_geografia(spark, dim_ubigeo),
     }
 
-    _logger.info(f"Tablas gold construidas: {len(tables)} tablas")
-    return tables, cached
+    marts = {
+        "MART_INGRESOS_GEOGRAFICO": build_mart_ingresos_geografico(
+            spark, fact_ingreso, dim_tiempo, dim_ubigeo, dim_nivel_gobierno,
+        ),
+        "MART_INGRESOS_CLASIFICADOR": build_mart_ingresos_clasificador(
+            spark, fact_ingreso, dim_tiempo, dim_rubro, dim_tipo_recurso, dim_generica,
+        ),
+        "MART_INGRESOS_EJECUTORA": build_mart_ingresos_ejecutora(
+            spark, fact_ingreso, dim_tiempo, dim_ejecutora, dim_ubigeo,
+        ),
+        "MART_PREDIAL": build_mart_predial(
+            spark, fact_formulario_sismepre, dim_ejecutora,
+            dim_anio_aplicacion, dim_formulario_sismepre, dim_pregunta_sismepre,
+        ),
+        "MART_RENAMU": build_mart_renamu(
+            spark, fact_renamu, dim_ubigeo, dim_pregunta_renamu,
+        ),
+    }
+
+    _logger.info(f"Construidas {len(dims)} dims y {len(marts)} marts gold")
+    return dims, marts
