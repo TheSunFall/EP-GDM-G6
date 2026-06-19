@@ -35,7 +35,7 @@ class SilverPipeline:
             # 1. Quality
             self.logger.info("Paso 1/3: Quality fixes")
             stage_dir = Path(settings.project_root) / "data" / "silver" / "stage"
-            stage = quality.fix_all(self.spark, municipios=municipios)
+            stage = quality.fix_all(self.spark, municipios=municipios, skip_unchanged=skip_unchanged)
 
             # 2. Schema (transformaciones)
             self.logger.info("Paso 2/3: Building schema (dims + facts)")

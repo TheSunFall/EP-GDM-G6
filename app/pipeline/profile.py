@@ -25,10 +25,23 @@ def run(args: argparse.Namespace) -> None:
         logger.error("Run 'bronze' first to generate Bronze Parquet files.")
         return
 
-    parquet_files = list(parquet_root.rglob("*.parquet"))
-    if not parquet_files:
+    all_parquet_files = list(parquet_root.rglob("*.parquet"))
+    if not all_parquet_files:
         logger.error(f"No Parquet files found under: {parquet_root}")
         return
+
+    parquet_files = all_parquet_files
+    if getattr(args, "skip_existing", False) and report_dir.exists():
+        existing_stems = {f.stem.replace("_quality", "") for f in report_dir.glob("*_quality.json")}
+        parquet_files = [p for p in parquet_files if p.stem not in existing_stems]
+        if not parquet_files:
+            logger.info(
+                f"Todos los {len(all_parquet_files)} archivos ya tienen reporte en {report_dir}, omitiendo"
+            )
+            return
+        logger.info(
+            f"skip_existing: {len(parquet_files)} nuevos de {len(all_parquet_files)} archivos totales"
+        )
 
     logger.info(
         f"Starting data quality profiling: {len(parquet_files)} files, output directory: {str(report_dir)}"
@@ -37,7 +50,7 @@ def run(args: argparse.Namespace) -> None:
     logger.info(f"Files   : {len(parquet_files)}")
     logger.info(f"Output  : {report_dir}")
 
-    reports = profile_directory(parquet_root, report_dir)
+    reports = profile_directory(parquet_root, report_dir, parquet_files=parquet_files)
 
     logger.info(f"\n{'ARCHIVO':<45} {'FILAS':>8} {'SCORE':>7}  ESTADO")
     logger.info("-" * 70)

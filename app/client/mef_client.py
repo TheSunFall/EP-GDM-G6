@@ -40,6 +40,7 @@ class MefClient(BaseClient):
         datasets: Dataset,
         use_schema: Literal["global", "individual", "none"] = "none",
         save_path: str | Path = settings.config.api.path,
+        module_names: list[str] | None = None,
     ):
         """
         Descarga todos los recursos especificados y los guarda como parquet con PySpark.
@@ -52,12 +53,19 @@ class MefClient(BaseClient):
             use_schema: "global", "individual" o "none" — controla si se descarga el
                         diccionario (se descarga pero no se aplica como schema de tipos)
             save_path: Ruta de salida
+            module_names: Lista opcional de nombres de módulos a descargar. Si es None,
+                         se descargan todos los módulos del dataset.
         """
+        modules = [m for m in datasets.modules if m.name in module_names] if module_names else datasets.modules
+        if not modules:
+            _logger.info(f"Dataset {datasets.name}: ningún módulo nuevo que descargar")
+            return
+
         if use_schema == "global" and datasets.dictionary:
             _logger.info(f"Descargando diccionario global para {datasets.name}")
             self.get_data_dict(datasets.dictionary[0])
 
-        for module in datasets.modules:
+        for module in modules:
             _logger.info(f"Procesando módulo: {module.name}")
 
             if use_schema == "individual" and module.dictionary:

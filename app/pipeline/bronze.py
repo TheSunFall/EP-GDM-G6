@@ -3,7 +3,7 @@ from pyspark.sql import SparkSession
 from app.client.mef_client import MefClient
 from app.settings.settings import settings
 from app.utils.logging import UnifiedLogger
-from app.utils.manifest import bronze_entry, write_bronze_manifest
+from app.utils.manifest import bronze_entry, read_bronze_manifest, write_bronze_manifest
 from app.utils.spark import SparkClient
 
 
@@ -12,31 +12,52 @@ class BronzePipeline:
         self.spark: SparkSession = spark_client.get_session()
         self.logger = UnifiedLogger("BronzePipeline", "bronze")
 
-    def run(self):
+    def run(self, skip_existing: bool = False):
         self.logger.info("Iniciando Bronze Pipeline")
         manifest_entries = []
         seen_files: set[str] = set()
         api_path = settings.project_root / settings.config.api.path
 
+        # Leer módulos ya descargados si se solicita omitir existentes
+        existing_modules: set[tuple[str, str]] = set()
+        if skip_existing:
+            manifest_path = api_path / "manifest.parquet"
+            for entry in read_bronze_manifest(manifest_path, self.spark):
+                existing_modules.add((entry["source_name"], entry["module_name"]))
+            self.logger.info(
+                f"Modo skip_existing: {len(existing_modules)} módulos ya registrados en manifest"
+            )
+
         for dataset in settings.config.datasets:
-            self.logger.info(f"Descargando dataset: {dataset.name}")
             client = MefClient(spark=self.spark, fs_url=dataset.url)
-            try:
-                if dataset.name == "SIAF":
-                    self.logger.info("Usando esquema global para SIAF")
-                    client.get_zip(dataset, use_schema="global")
-                elif dataset.name == "SISMEPRE":
-                    self.logger.info("Usando esquema individual para SISMEPRE")
-                    client.get_zip(dataset, use_schema="individual")
-                elif dataset.name == "RENAMU":
-                    self.logger.info("Usando esquema individual para RENAMU")
-                    client.get_zip(dataset, use_schema="individual")
-                self.logger.info(f"Dataset {dataset.name} descargado exitosamente")
-            except Exception as e:
-                self.logger.error(
-                    f"Error descargando dataset {dataset.name}: {e}", stack_trace=True
-                )
-                raise
+            schema = {"SIAF": "global", "SISMEPRE": "individual", "RENAMU": "individual"}.get(
+                dataset.name, "none"
+            )
+
+            if skip_existing:
+                new_module_names = [
+                    m.name for m in dataset.modules
+                    if (dataset.name, m.name) not in existing_modules
+                ]
+                if not new_module_names:
+                    self.logger.info(
+                        f"Dataset {dataset.name}: todos los módulos ya existen, omitiendo"
+                    )
+                else:
+                    self.logger.info(
+                        f"Dataset {dataset.name}: descargando {len(new_module_names)} módulo(s) nuevo(s)"
+                    )
+                    client.get_zip(dataset, use_schema=schema, module_names=new_module_names)
+            else:
+                self.logger.info(f"Descargando dataset: {dataset.name}")
+                try:
+                    client.get_zip(dataset, use_schema=schema)
+                    self.logger.info(f"Dataset {dataset.name} descargado exitosamente")
+                except Exception as e:
+                    self.logger.error(
+                        f"Error descargando dataset {dataset.name}: {e}", stack_trace=True
+                    )
+                    raise
 
             prefix = f"{dataset.name}-"
             for f in sorted(api_path.glob(f"{prefix}*.parquet")):

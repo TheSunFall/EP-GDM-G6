@@ -56,7 +56,7 @@ PowerShell (recomendado en Windows):
 CMD:
   .venv\Scripts\activate.bat
 
-Bash/Git Bash:
+Bash/Git Bash (Linux):
   source .venv/Scripts/activate
 
 Deberías ver (.venv) al inicio de tu prompt en la terminal.
@@ -118,14 +118,42 @@ D) Ejecutar solo SILVER (calidad + star schema):
    - python main.py silver --drop --municipios remap
    - python main.py silver --skip-unchanged --municipios drop
 
-E) Ejecutar solo GOLD (marts de negocio):
+E) Ejecución incremental (al agregar un nuevo año/módulo a config.yaml):
+   Cuando agregas un nuevo módulo (ej. "2020-Ingreso") a un dataset existente
+   en config.yaml, evita reprocesar todo lo que ya existe:
+
+   # Bronze: descarga solo módulos nuevos (los existentes se saltan)
+   python main.py bronze --skip-existing
+
+   # Profile: perfila solo parquets nuevos (los ya perfilados se saltan)
+   python main.py profile --skip-existing
+
+   # Silver: si nada cambió, se omite por completo. Si algo cambió,
+   # reprocesa solo los stages afectados (ej. ingreso_unified si se
+   # agregó un año de SIAF) y reutiliza stage parquets de datasets
+   # no modificados (SISMEPRE, RENAMU).
+   python main.py silver --skip-unchanged
+
+   # Gold y PowerBI siempre se reconstruyen por completo (derivan de
+   # todo el silver, por lo que un nuevo año afecta los marts).
+   python main.py gold --drop
+   python main.py powerbi --drop
+
+   Ejemplo completo para agregar un nuevo año de SIAF:
+   python main.py bronze --skip-existing
+   python main.py profile --skip-existing
+   python main.py silver --skip-unchanged
+   python main.py gold --drop
+   python main.py powerbi --drop
+
+F) Ejecutar solo GOLD (marts de negocio):
    python main.py gold
    python main.py gold --drop
      (Recrea data/gold/ desde cero)
 
-F) Ejecutar generación de .parquet para Power BI:
+G) Ejecutar generación de .parquet para Power BI:
    python main.py powerbi
-   python main.py powerbi --drop(recrea desde cero)
+   python main.py powerbi --drop (recrea desde cero)
 
 TIEMPOS APROXIMADOS (primera ejecución):
   - bronze: 2-5 minutos (descarga de MEF e INEI)
@@ -313,6 +341,30 @@ python main.py gold --drop
 
 # Solo powerbi (exportar marts para Power BI)
 python main.py powerbi --drop
+
+# ── EJECUCIÓN INCREMENTAL ──────────────────────────────────────────────────────
+# (Al agregar un nuevo módulo a config.yaml, evita reprocesar lo existente)
+
+# Bronze: solo descarga módulos nuevos
+python main.py bronze --skip-existing
+
+# Profile: solo perfila parquets nuevos
+python main.py profile --skip-existing
+
+# Silver: solo reprocesa stages cuyas fuentes bronze cambiaron
+python main.py silver --skip-unchanged
+
+# Gold y PowerBI siempre se reconstruyen completos
+python main.py gold --drop
+python main.py powerbi --drop
+
+# Pipeline completo incremental (ej: agregar 2020-Ingreso a SIAF)
+python main.py bronze --skip-existing
+python main.py profile --skip-existing
+python main.py silver --skip-unchanged
+python main.py gold --drop
+python main.py powerbi --drop
+# ────────────────────────────────────────────────────────────────────────────────
 
 # Abrir un notebook en Jupyter
 jupyter notebook notebooks/01_run_bronze.ipynb

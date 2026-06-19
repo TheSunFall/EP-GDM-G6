@@ -596,10 +596,14 @@ def profile_parquet(parquet_path: Path) -> Dict[str, Any]:
     return results
 
 
-def profile_directory(parquet_root: Path, report_dir: Path) -> List[Dict[str, Any]]:
+def profile_directory(
+    parquet_root: Path,
+    report_dir: Path,
+    parquet_files: list[Path] | None = None,
+) -> List[Dict[str, Any]]:
     _logger.info(f"Iniciando perfilado de directorio: {parquet_root}")
     report_dir.mkdir(parents=True, exist_ok=True)
-    parquet_units = _find_parquet_units(parquet_root)
+    parquet_units = parquet_files if parquet_files is not None else _find_parquet_units(parquet_root)
 
     _logger.info(f"Encontrados {len(parquet_units)} archivos parquet para perfilar")
 

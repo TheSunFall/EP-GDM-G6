@@ -19,6 +19,7 @@ datasets:
       - filename: "Ingresos_diccionario"
         id: "9d38c7f5-95cc-4613-8737-28856e0f029b"
     modules:
+      - name: "2020-Ingreso"
       - name: "2021-Ingreso"
       - name: "2022-Ingreso"
       - name: "2023-Ingreso"

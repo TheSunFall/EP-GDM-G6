@@ -14,13 +14,24 @@ def main():
     )
     subparsers = parser.add_subparsers(dest="command", help="Etapa del pipeline a ejecutar")
 
-    subparsers.add_parser(
+    bronze_parser = subparsers.add_parser(
         "bronze",
         help="Descarga fuentes MEF/INEI y convierte a parquet (data/bronze/)",
     )
-    subparsers.add_parser(
+    bronze_parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Omite descarga de módulos que ya existen en el bronze manifest.",
+    )
+
+    profile_parser = subparsers.add_parser(
         "profile",
         help="Perfilado de calidad sobre bronze (data/profiling/)",
+    )
+    profile_parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Omite perfilado de archivos que ya tienen reporte en data/profiling/.",
     )
 
     silver_parser = subparsers.add_parser(
@@ -83,9 +94,9 @@ def main():
     if args.command is None:
         _run_all()
     elif args.command == "bronze":
-        _run_bronze()
+        _run_bronze(getattr(args, "skip_existing", False))
     elif args.command == "profile":
-        _run_profile()
+        _run_profile(getattr(args, "skip_existing", False))
     elif args.command == "silver":
         _run_silver(
             args.step,
@@ -112,18 +123,18 @@ def _run_all():
     _run_powerbi(drop=True)
 
 
-def _run_bronze():
+def _run_bronze(skip_existing: bool = False):
     """Descarga fuentes MEF/INEI y convierte CSV → parquet con PySpark."""
     spark = SparkClient()
     pipeline = BronzePipeline(spark)
-    pipeline.run()
+    pipeline.run(skip_existing=skip_existing)
 
 
-def _run_profile():
+def _run_profile(skip_existing: bool = False):
     """Perfila la calidad de los parquets bronze con 8 criterios."""
     from app.pipeline.profile import run as run_profile
 
-    run_profile(argparse.Namespace())
+    run_profile(argparse.Namespace(skip_existing=skip_existing))
 
 
 def _run_silver(

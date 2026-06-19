@@ -9,6 +9,8 @@ import pyarrow.parquet as pq
 from pyspark.sql import SparkSession
 from pyspark.sql.types import LongType, StringType, StructField, StructType
 
+from app.settings.settings import settings
+
 # Esquemas Arrow equivalentes a los Spark — usados en write para evitar Python workers
 _BRONZE_PA_SCHEMA = pa.schema([
     pa.field("source_name", pa.string()),
@@ -117,19 +119,30 @@ def stage_bronze_row_count_total_map(
 
 
 # Mapeo de cada tabla stage a sus fuentes bronze (source_name, module_prefix).
-STAGE_TO_BRONZE_SOURCES: dict[str, list[tuple[str, str]]] = {
-    "ingreso_unified": [("SIAF", y) for y in ("2021", "2022", "2023", "2024")],
-    "rentas_preguntas": [("SISMEPRE", "rentas_preguntas")],
-    "rentas_formulario": [("SISMEPRE", "rentas_formulario")],
-    "rentas_esat_estadistica_atm": [("SISMEPRE", "rentas_esat_estadistica_atm")],
-    "rentas_respuestas": [("SISMEPRE", "rentas_respuestas")],
-    "rentas_ano_aplicacion": [("SISMEPRE", "rentas_ano_aplicacion")],
-    "categorias_municipalidades": [],
-}
-for _y in ("2021", "2022", "2023", "2024", "2025"):
-    STAGE_TO_BRONZE_SOURCES[f"renamu_{_y}"] = [
-        ("RENAMU", _y if _y != "2025" else "984-Modulo1963")
-    ]
+# Se construye dinámicamente desde config.yaml — añadir un módulo al datasets
+# no requiere cambios de código.
+def _build_stage_to_bronze_sources() -> dict[str, list[tuple[str, str]]]:
+    sources: dict[str, list[tuple[str, str]]] = {}
+    for dataset in settings.config.datasets:
+        name = dataset.name
+        if name == "SIAF":
+            ingreso_keys = [(name, m.name) for m in dataset.modules if m.name.endswith("-Ingreso")]
+            if ingreso_keys:
+                sources["ingreso_unified"] = ingreso_keys
+        elif name == "SISMEPRE":
+            for module in dataset.modules:
+                sources[module.name] = [(name, module.name)]
+        elif name == "RENAMU":
+            for module in dataset.modules:
+                if module.name == "984-Modulo1963":
+                    sources["renamu_2025"] = [(name, module.name)]
+                else:
+                    sources[f"renamu_{module.name}"] = [(name, module.name)]
+    sources.setdefault("categorias_municipalidades", [])
+    return sources
+
+
+STAGE_TO_BRONZE_SOURCES: dict[str, list[tuple[str, str]]] = _build_stage_to_bronze_sources()
 
 
 def _compute_bronze_total(
@@ -184,3 +197,35 @@ def bronze_unchanged(
     if mismatches:
         return False, "; ".join(mismatches)
     return True, "Todos los conteos bronze coinciden con el stage manifest"
+
+
+def changed_stages(
+    bronze_manifest_path: str | Path,
+    stage_manifest_path: str | Path,
+    spark: SparkSession,
+) -> set[str]:
+    """
+    Retorna el conjunto de nombres de stage cuyas fuentes bronze cambiaron
+    (nuevos módulos, filas diferentes, etc.).
+    """
+    bronze_path = Path(bronze_manifest_path)
+    stage_path = Path(stage_manifest_path)
+
+    if not bronze_path.exists() or not stage_path.exists():
+        return set(STAGE_TO_BRONZE_SOURCES.keys())
+
+    bronze_map = bronze_row_count_map(bronze_path, spark)
+    stage_map = stage_bronze_row_count_total_map(stage_path, spark)
+
+    changed: set[str] = set()
+    for stage_name, sources in STAGE_TO_BRONZE_SOURCES.items():
+        if not sources:
+            continue
+        if stage_name not in stage_map:
+            changed.add(stage_name)
+            continue
+        current_total = _compute_bronze_total(bronze_map, sources)
+        if current_total != stage_map[stage_name]:
+            changed.add(stage_name)
+
+    return changed

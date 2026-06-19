@@ -7,7 +7,7 @@ from pyspark.sql import functions as F
 
 from app.settings.settings import settings
 from app.utils.logging import UnifiedLogger
-from app.utils.manifest import STAGE_TO_BRONZE_SOURCES, bronze_row_count_map, stage_entry, write_stage_manifest
+from app.utils.manifest import STAGE_TO_BRONZE_SOURCES, bronze_row_count_map, changed_stages, stage_entry, write_stage_manifest
 
 _logger = UnifiedLogger("SilverQuality", "silver")
 
@@ -250,10 +250,34 @@ def fix_renamu_984(spark: SparkSession, year: str = "2025") -> DataFrame | None:
 # ── orquestador ────────────────────────────────────────────────────────────────
 
 
-def fix_all(spark: SparkSession, municipios: str = "legacy") -> dict[str, DataFrame | list[DataFrame]]:
+def _process_or_load(
+    spark: SparkSession,
+    stage_name: str,
+    fix_func: callable,
+    changed: set[str] | None,
+) -> DataFrame:
+    """Procesa el stage si cambió, o lo carga del parquet existente."""
+    stage_path = _STAGE / f"{stage_name}.parquet"
+    if changed is not None and stage_name not in changed and stage_path.exists():
+        df = spark.read.parquet(str(stage_path))
+        _logger.info(
+            f"{stage_name}: sin cambios en bronze, reutilizando stage existente ({df.count()} filas)"
+        )
+        return df
+    return fix_func()
+
+
+def fix_all(
+    spark: SparkSession,
+    municipios: str = "legacy",
+    skip_unchanged: bool = False,
+) -> dict[str, DataFrame | list[DataFrame]]:
     """
     Aplica correcciones de calidad a todos los archivos Bronze.
     Guarda parquet corregidos en data/silver/stage/ y devuelve un dict de DataFrames.
+
+    Si skip_unchanged=True y el stage manifest existe, omite las correcciones para
+    stages cuyas fuentes bronze no cambiaron (reutiliza el parquet stage existente).
     """
     _logger.info("Iniciando correcciones de calidad para todos los datasets")
     _STAGE.mkdir(parents=True, exist_ok=True)
@@ -266,15 +290,19 @@ def fix_all(spark: SparkSession, municipios: str = "legacy") -> dict[str, DataFr
         _logger.info(f"Guardado: {out}")
         return df
 
+    # Determinar qué stages cambiaron (solo si skip_unchanged está activo)
+    changed: set[str] | None = None
+    if skip_unchanged:
+        bronze_manifest = _BRONZE / "manifest.parquet"
+        stage_manifest = _STAGE / "manifest.parquet"
+        changed = changed_stages(bronze_manifest, stage_manifest, spark)
+        if changed:
+            _logger.info(f"Stages cambiados: {sorted(changed)}")
+        else:
+            _logger.info("Ningún stage cambió respecto al stage manifest")
+
     _logger.info("Procesando dataset SIAF - Ingreso")
     ingreso_df = fix_ingreso(spark)
-
-    _logger.info("Procesando dataset SISMEPRE")
-    preguntas_df = fix_rentas_preguntas(spark)
-    formulario_df = fix_rentas_formulario(spark)
-    esat_df = fix_rentas_esat(spark)
-    respuestas_df = fix_rentas_respuestas(spark)
-    ano_df = fix_rentas_ano_aplicacion(spark)
 
     # SIAF -> solo MUNICIPALIDADES (gobiernos locales municipales).
     # 1) nivel de gobierno LOCAL (descarta Nacional/Regional).
@@ -290,6 +318,13 @@ def fix_all(spark: SparkSession, municipios: str = "legacy") -> dict[str, DataFr
     )
     result["ingreso_unified"] = _save("ingreso_unified", ingreso_df)
 
+    _logger.info("Procesando dataset SISMEPRE")
+    preguntas_df = _process_or_load(spark, "rentas_preguntas", lambda: fix_rentas_preguntas(spark), changed)
+    formulario_df = _process_or_load(spark, "rentas_formulario", lambda: fix_rentas_formulario(spark), changed)
+    esat_df = _process_or_load(spark, "rentas_esat_estadistica_atm", lambda: fix_rentas_esat(spark), changed)
+    respuestas_df = _process_or_load(spark, "rentas_respuestas", lambda: fix_rentas_respuestas(spark), changed)
+    ano_df = _process_or_load(spark, "rentas_ano_aplicacion", lambda: fix_rentas_ano_aplicacion(spark), changed)
+
     # Etiquetado de categoría A-G (sin pérdida): puente SEC_EJEC -> CATEGORIA
     # cruzando por ubigeo contra el Anexo IV del DS 003-2026-EF (categorias_secejec.csv).
     _logger.info(f"Etiquetando categorías municipales (modo={municipios})")
@@ -299,24 +334,48 @@ def fix_all(spark: SparkSession, municipios: str = "legacy") -> dict[str, DataFr
     )
 
     # SISMEPRE y RENAMU ya son municipales -> NO se filtran filas (sin pérdida).
-    result["rentas_esat"] = _save("rentas_esat_estadistica_atm", esat_df)
-    result["rentas_respuestas"] = _save("rentas_respuestas", respuestas_df)
-    result["rentas_preguntas"] = _save("rentas_preguntas", preguntas_df)
-    result["rentas_formulario"] = _save("rentas_formulario", formulario_df)
-    result["rentas_ano_aplicacion"] = _save("rentas_ano_aplicacion", ano_df)
+    # Guardar SISMEPRE en el stage (solo si fueron reprocesados).
+    if changed is None or "rentas_esat_estadistica_atm" in changed:
+        _save("rentas_esat_estadistica_atm", esat_df)
+    if changed is None or "rentas_respuestas" in changed:
+        _save("rentas_respuestas", respuestas_df)
+    if changed is None or "rentas_preguntas" in changed:
+        _save("rentas_preguntas", preguntas_df)
+    if changed is None or "rentas_formulario" in changed:
+        _save("rentas_formulario", formulario_df)
+    if changed is None or "rentas_ano_aplicacion" in changed:
+        _save("rentas_ano_aplicacion", ano_df)
+    result["rentas_esat"] = esat_df
+    result["rentas_respuestas"] = respuestas_df
+    result["rentas_preguntas"] = preguntas_df
+    result["rentas_formulario"] = formulario_df
+    result["rentas_ano_aplicacion"] = ano_df
 
     _logger.info("Procesando dataset RENAMU")
     renamu_dfs: list[DataFrame] = []
     for year in ("2021", "2022", "2023", "2024"):
+        stage_name = f"renamu_{year}"
         p = _BRONZE / f"RENAMU-{year}.parquet"
-        if p.exists():
-            renamu_dfs.append(_save(f"renamu_{year}", fix_renamu(spark, year)))
-        else:
+        if not p.exists():
             _logger.warning(f"RENAMU-{year}.parquet no encontrado, se omite")
+            continue
+        df = _process_or_load(spark, stage_name, lambda y=year: fix_renamu(spark, y), changed)
+        renamu_dfs.append(df)
+        if changed is None or stage_name in changed:
+            _save(stage_name, df)
 
+    # RENAMU 984 — no usa _process_or_load porque fix_renamu_984 puede devolver None
+    stage_name = "renamu_2025"
+    stage_path_984 = _STAGE / f"{stage_name}.parquet"
     df_984 = fix_renamu_984(spark)
+    if df_984 is None and changed is not None and stage_name not in changed and stage_path_984.exists():
+        df_984 = spark.read.parquet(str(stage_path_984))
+        _logger.info(
+            f"{stage_name}: sin cambios en bronze, reutilizando stage existente ({df_984.count()} filas)"
+        )
     if df_984 is not None:
-        _save("renamu_2025", df_984)
+        if changed is None or stage_name in changed:
+            _save("renamu_2025", df_984)
         renamu_dfs.append(df_984)
     result["renamu_dfs"] = renamu_dfs
     result["renamu_984"] = df_984

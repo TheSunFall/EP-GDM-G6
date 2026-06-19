@@ -97,6 +97,38 @@ python main.py gold --drop       # marts BI → data/gold/
 
 Todas las escrituras usan `mode("overwrite")`, así que las re-ejecuciones son idempotentes.
 
+### Ejecución incremental (al agregar un nuevo año/módulo)
+
+Cuando agregas un nuevo módulo (ej. `2020-Ingreso`) a un dataset existente en `config.yaml`,
+puedes evitar reprocesar todo lo que ya existe:
+
+```bash
+# Descarga solo los módulos nuevos (los existentes se saltan)
+python main.py bronze --skip-existing
+
+# Perfila solo los parquets nuevos (los ya perfilados se saltan)
+python main.py profile --skip-existing
+
+# Silver: si nada cambió se omite por completo (--skip-unchanged).
+# Si algo cambió, reprocesa solo los stages afectados y reutiliza
+# los stage parquets de datasets no modificados (SISMEPRE, RENAMU).
+python main.py silver --skip-unchanged
+
+# Gold y PowerBI siempre se reconstruyen por completo (derivan de todo el silver).
+python main.py gold --drop
+python main.py powerbi --drop
+```
+
+Estos flags están diseñados para usarse juntos al agregar datos nuevos:
+
+```bash
+python main.py bronze --skip-existing
+python main.py profile --skip-existing
+python main.py silver --skip-unchanged
+python main.py gold --drop
+python main.py powerbi --drop
+```
+
 ### Por Jupyter (carpeta `notebooks/`)
 
 8 notebooks que ejecutan el pipeline de punta a punta:
