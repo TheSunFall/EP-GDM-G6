@@ -72,9 +72,10 @@ class MefClient(BaseClient):
                 _logger.info(f"Descargando diccionario individual para {module.name}")
                 self.get_data_dict(module.dictionary[0])
 
-            _logger.info(f"Descargando archivo: {module.name}.zip")
+            suffix = "-Mensual" if module.type == "monthly" else ""
+            _logger.info(f"Descargando archivo: {module.name}{suffix}.zip")
             super().save(
-                super().get(f"{self.fs_url}/{module.name}.zip", type=datasets.type),
+                super().get(f"{self.fs_url}/{module.name}{suffix}.zip", type=datasets.type),
                 save_path,
                 None,
                 "zip",

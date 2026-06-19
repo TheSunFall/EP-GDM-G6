@@ -19,11 +19,14 @@ datasets:
       - filename: "Ingresos_diccionario"
         id: "9d38c7f5-95cc-4613-8737-28856e0f029b"
     modules:
-      - name: "2020-Ingreso"
       - name: "2021-Ingreso"
       - name: "2022-Ingreso"
       - name: "2023-Ingreso"
       - name: "2024-Ingreso"
+      - name: "2025-Ingreso"
+        type: "monthly"
+      - name: "2026-Ingreso"
+        type: "monthly"
 
   - name: "SISMEPRE"
     full_name: "Seguimiento de la Meta de Impuesto Predial"
