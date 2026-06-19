@@ -13,5 +13,16 @@ wheels/
 data/bronze
 data/profiling
 data/silver
+data/gold
+data/powerbi
 logs/
 .env
+
+#claude
+.claude/
+CLAUDE.md
+
+#planes
+PLAN_PARQUET.md
+powerbi_integration.md
+operations.md

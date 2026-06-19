@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-import pyarrow.parquet as pq
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 
@@ -187,82 +186,47 @@ def fix_renamu(spark: SparkSession, year: str) -> DataFrame:
     return _log_count(f"renamu_{year}", df)
 
 
-def _normalize_municipalidad():
-    """UDF que normaliza nombres de municipalidad a una clave común para join."""
-    import re
-    import unicodedata
-
-    PREFIXES = [
-        "MUNICIPALIDAD DISTRITAL DE ",
-        "MUNICIPALIDAD PROVINCIAL DE ",
-        "MUNICIPALIDAD METROPOLITANA DE ",
-        "MUNICIPALIDAD DISTRITAL DEL ",
-        "MUNICIPALIDAD PROVINCIAL DEL ",
-        "MUNICIPALIDAD DISTRITAL ",
-        "MUNICIPALIDAD PROVINCIAL ",
-        "MUNICIPALIDAD METROPOLITANA ",
-        "M. D. DE ",
-        "M. P. DE ",
-        "M. P. DEL ",
-        "M. D. DEL ",
-        "M. D . DE ",
-        "M. D . ",
-        "M.P. DE ",
-        "M. D. ",
-        "M. P. ",
-        "M.P. ",
-    ]
-
-    def _norm(name: str) -> str:
-        if not name:
-            return ""
-        n = unicodedata.normalize("NFKD", name.upper())
-        n = n.encode("ascii", "ignore").decode("ascii")
-        n = re.sub(r"\s*\([^)]*\)\s*", " ", n)
-        for prefix in PREFIXES:
-            if n.startswith(prefix):
-                n = n[len(prefix) :]
-                break
-        n = n.lower().strip()
-        n = re.sub(r"\bsta\.?\b", "santa", n)
-        n = re.sub(r"\bsto\.?\b", "santo", n)
-        n = re.sub(r"\bstgo\.?\b", "santiago", n)
-        n = re.sub(r"\bj\.?\b", "jose", n)
-        n = re.sub(r"\s*-\s*", "-", n)
-        n = re.sub(r"\s+", " ", n).strip()
-        return n
-
-    return F.udf(_norm, "string")
-
-
 def fix_categorias_municipalidades(
-    spark: SparkSession, esat_df: DataFrame
+    spark: SparkSession, esat_df: DataFrame, ingreso_df: DataFrame, municipios: str = "legacy"
 ) -> DataFrame:
-    csv_path = str(settings.project_root / "data" / "CategoriasMunicipalidades.csv")
-    categorias = (
-        spark.read.option("header", True)
-        .option("delimiter", ";")
-        .option("encoding", "UTF-8")
-        .csv(csv_path)
-    )
-    norm = _normalize_municipalidad()
-    esat_norm = esat_df.select(
-        "SEC_EJEC",
-        F.col("MUNICIPALIDAD_NOMBRE").alias("MUNICIPALIDAD_NOMBRE_ORIG"),
-        norm("MUNICIPALIDAD_NOMBRE").alias("_NORMALIZED"),
-    )
-    csv_norm = categorias.select(
-        F.col("Municipalidad").alias("MUNICIPALIDAD_ORIG"),
-        F.col("Categoria").alias("CATEGORIA"),
-        norm("Municipalidad").alias("_NORMALIZED"),
-    )
+    """Devuelve el puente SEC_EJEC -> CATEGORIA.
+
+    legacy: lee ``data/categorias_secejec.csv`` (A-G por ubigeo, Anexo IV DS 003-2026-EF).
+    drop/remap: calcula Lima=C / resto=G directamente desde ingreso_df, sin depender del CSV.
+    """
+    if municipios != "legacy":
+        joined = (
+            ingreso_df.select(
+                F.col("SEC_EJEC").cast("int").alias("SEC_EJEC"),
+                F.when(
+                    F.upper(F.trim(F.coalesce(F.col("DEPARTAMENTO_EJECUTORA_NOMBRE"), F.lit("")))) == "LIMA",
+                    F.lit("C"),
+                ).otherwise(F.lit("G")).alias("CATEGORIA"),
+            )
+            .filter(F.col("SEC_EJEC").isNotNull())
+            .dropDuplicates(["SEC_EJEC"])
+        )
+        etiquetadas = joined.count()
+        _logger.info(
+            f"categorias_municipalidades: {etiquetadas} ejecutoras etiquetadas "
+            f"(modo {municipios}: Lima=C, resto=G)"
+        )
+        return joined
+
+    csv_path = str(settings.project_root / "data" / "categorias_secejec.csv")
     joined = (
-        esat_norm.join(csv_norm, on="_NORMALIZED", how="inner")
-        .select("SEC_EJEC", "CATEGORIA")
+        spark.read.option("header", True).csv(csv_path)
+        .select(
+            F.col("SecEjec").cast("int").alias("SEC_EJEC"),
+            F.upper(F.trim(F.coalesce(F.col("Categoria"), F.lit("")))).alias("CATEGORIA"),
+        )
+        .filter(F.col("SEC_EJEC").isNotNull())
         .dropDuplicates(["SEC_EJEC"])
     )
+    etiquetadas = joined.filter(F.col("CATEGORIA") != "").count()
     _logger.info(
-        f"categorias_municipalidades: {joined.count()} ejecutoras mapeadas desde CategoriasMunicipalidades.csv"
+        f"categorias_municipalidades: {etiquetadas} ejecutoras etiquetadas "
+        f"(cruce por ubigeo, Anexo IV DS 003-2026-EF)"
     )
     return joined
 
@@ -286,7 +250,7 @@ def fix_renamu_984(spark: SparkSession, year: str = "2025") -> DataFrame | None:
 # ── orquestador ────────────────────────────────────────────────────────────────
 
 
-def fix_all(spark: SparkSession) -> dict[str, DataFrame | list[DataFrame]]:
+def fix_all(spark: SparkSession, municipios: str = "legacy") -> dict[str, DataFrame | list[DataFrame]]:
     """
     Aplica correcciones de calidad a todos los archivos Bronze.
     Guarda parquet corregidos en data/silver/stage/ y devuelve un dict de DataFrames.
@@ -312,26 +276,31 @@ def fix_all(spark: SparkSession) -> dict[str, DataFrame | list[DataFrame]]:
     respuestas_df = fix_rentas_respuestas(spark)
     ano_df = fix_rentas_ano_aplicacion(spark)
 
-    # Construir filtro de categorías municipales y filtrar datasets
-    _logger.info("Construyendo filtro de categorías municipales desde CategoriasMunicipalidades.csv")
-    categorias_df = fix_categorias_municipalidades(spark, esat_df)
+    # SIAF -> solo MUNICIPALIDADES (gobiernos locales municipales).
+    # 1) nivel de gobierno LOCAL (descarta Nacional/Regional).
+    # 2) el nombre debe contener "MUNICIPALIDAD" y NO "MANCOMUNIDAD" -> excluye
+    #    las mancomunidades municipales (asociaciones de municipios, no son
+    #    municipios individuales). Solo quedan las municipalidades distritales/
+    #    provinciales/metropolitanas.
+    _nombre_ejec = F.upper(F.coalesce(F.col("EJECUTORA_NOMBRE"), F.lit("")))
+    ingreso_df = ingreso_df.filter(
+        F.upper(F.coalesce(F.col("NIVEL_GOBIERNO_NOMBRE"), F.lit(""))).contains("LOCAL")
+        & _nombre_ejec.contains("MUNICIPALIDAD")
+        & ~_nombre_ejec.contains("MANCOMUNIDAD")
+    )
+    result["ingreso_unified"] = _save("ingreso_unified", ingreso_df)
+
+    # Etiquetado de categoría A-G (sin pérdida): puente SEC_EJEC -> CATEGORIA
+    # cruzando por ubigeo contra el Anexo IV del DS 003-2026-EF (categorias_secejec.csv).
+    _logger.info(f"Etiquetando categorías municipales (modo={municipios})")
+    categorias_df = fix_categorias_municipalidades(spark, esat_df, ingreso_df, municipios=municipios)
     result["categorias_municipalidades"] = _save(
         "categorias_municipalidades", categorias_df
     )
 
-    valid_sec_ejec = categorias_df.select("SEC_EJEC").distinct()
-    n_valid = valid_sec_ejec.count()
-    _logger.info(f"Filtrando por {n_valid} ejecutoras válidas según CategoriasMunicipalidades.csv")
-
-    ingreso_df = ingreso_df.join(valid_sec_ejec, on="SEC_EJEC", how="inner")
-    result["ingreso_unified"] = _save("ingreso_unified", ingreso_df)
-
-    esat_df = esat_df.join(valid_sec_ejec, on="SEC_EJEC", how="inner")
+    # SISMEPRE y RENAMU ya son municipales -> NO se filtran filas (sin pérdida).
     result["rentas_esat"] = _save("rentas_esat_estadistica_atm", esat_df)
-
-    respuestas_df = respuestas_df.join(valid_sec_ejec, on="SEC_EJEC", how="inner")
     result["rentas_respuestas"] = _save("rentas_respuestas", respuestas_df)
-
     result["rentas_preguntas"] = _save("rentas_preguntas", preguntas_df)
     result["rentas_formulario"] = _save("rentas_formulario", formulario_df)
     result["rentas_ano_aplicacion"] = _save("rentas_ano_aplicacion", ano_df)
@@ -352,22 +321,22 @@ def fix_all(spark: SparkSession) -> dict[str, DataFrame | list[DataFrame]]:
     result["renamu_dfs"] = renamu_dfs
     result["renamu_984"] = df_984
 
-    _write_stage_manifest()
+    _write_stage_manifest(spark)
     _logger.info("Correcciones de calidad completadas para todos los datasets")
     return result
 
 
-def _write_stage_manifest():
-    """Scan stage parquet files and write a manifest with row counts and bronze source totals."""
-    bronze_map = bronze_row_count_map(_BRONZE / "manifest.parquet")
+def _write_stage_manifest(spark: SparkSession) -> None:
+    """Escanea los parquets del stage y escribe un manifest con conteos de filas."""
+    bronze_map = bronze_row_count_map(_BRONZE / "manifest.parquet", spark)
 
     entries = []
     for stage_name, bronze_sources in STAGE_TO_BRONZE_SOURCES.items():
         stage_path = _STAGE / f"{stage_name}.parquet"
         if not stage_path.exists():
             continue
-        dataset = pq.ParquetDataset(str(stage_path))
-        row_count = sum(fragment.metadata.num_rows for fragment in dataset.fragments)
+
+        row_count = spark.read.parquet(str(stage_path)).count()
         file_size = sum(f.stat().st_size for f in stage_path.rglob("*") if f.is_file())
 
         bronze_total = 0
@@ -379,11 +348,11 @@ def _write_stage_manifest():
 
         entries.append(stage_entry(stage_name, row_count, file_size, bronze_total))
         _logger.info(
-            f"Stage manifest: {stage_name}.parquet → {row_count} filas, "
+            f"Stage manifest: {stage_name}.parquet -> {row_count} filas, "
             f"{file_size} bytes, bronze_total={bronze_total}"
         )
 
     if entries:
         manifest_path = _STAGE / "manifest.parquet"
-        write_stage_manifest(entries, manifest_path)
+        write_stage_manifest(entries, manifest_path, spark)
         _logger.info(f"Stage manifest escrito: {manifest_path} ({len(entries)} entradas)")

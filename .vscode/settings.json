@@ -1,0 +1,13 @@
+{
+  // El .env del repo trae rutas Linux (JAVA_HOME=/usr/lib/jvm/..., HADOOP_HOME=lib).
+  // Si VSCode lo inyecta en el kernel, Spark no arranca en Windows. Apuntamos
+  // python.envFile a un archivo vacio para NO inyectarlo; JAVA_HOME/HADOOP_HOME
+  // se toman de las variables de Windows (Machine), que son correctas.
+  // La password de SQL Server NO se ve afectada: app/settings/settings.py lee el
+  // .env por su cuenta con python-dotenv.
+  "python.envFile": "${workspaceFolder}/.vscode/empty.env",
+
+  // Ejecutar los notebooks desde la raiz del repo, no desde notebooks/, para que
+  // las rutas relativas (data/...) y los imports (import app) funcionen.
+  "jupyter.notebookFileRoot": "${workspaceFolder}"
+}

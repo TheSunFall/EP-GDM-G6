@@ -38,18 +38,9 @@ class LogsConfig(BaseModel):
     path: str
 
 
-class SilverDatabaseConfig(BaseModel):
-    host: str
-    port: int
-    database: str
-    dbschema: str
-    user: str
-
-
 class SilverConfig(BaseModel):
     path: str
     profiling_path: str
-    database: SilverDatabaseConfig
 
 
 class Config(BaseModel):

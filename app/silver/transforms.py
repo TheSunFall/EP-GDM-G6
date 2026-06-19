@@ -59,14 +59,11 @@ def build_dim_tiempo(
         .withColumn("SEGUNDO", F.lit(None).cast("smallint"))
     )
 
-    # SISMEPRE anual: cada año en ANO_APLICACION / INICIO / FIN → fila única
+    # SISMEPRE anual: cada año en ANO_APLICACION / INICIO / FIN -> fila única
+    # stack() es Python UDTF en PySpark 4.x y crashea en Windows; usar array+explode
+    _anio_cols = [F.col("ANO_APLICACION"), F.col("ANO_APLICACION_INICIO"), F.col("ANO_APLICACION_FIN")]
     sismepre_years = (
-        rentas_ano_df.select(
-            F.col("ANO_APLICACION").alias("ANIO_VAL"),
-            F.col("ANO_APLICACION_INICIO").alias("ANIO_INICIO"),
-            F.col("ANO_APLICACION_FIN").alias("ANIO_FIN"),
-        )
-        .selectExpr("stack(3, ANIO_VAL, ANIO_INICIO, ANIO_FIN) as ANIO_RAW")
+        rentas_ano_df.select(F.explode(F.array(*_anio_cols)).alias("ANIO_RAW"))
         .filter(F.col("ANIO_RAW").isNotNull())
         .select(
             F.col("ANIO_RAW").cast("int").alias("IdTiempo"),
@@ -121,8 +118,8 @@ def build_dim_ejecutora(
     esat_df: DataFrame,
     respuestas_df: DataFrame,
     categorias_df: DataFrame,
+    municipios: str = "legacy",
 ) -> DataFrame:
-    # EJECUTORA puede ser NULL en algunos registros → coalesce con SEC_EJEC (igual que el SQL proc)
     from_ingreso = ingreso_df.select(
         F.col("SEC_EJEC").cast("int"),
         F.coalesce(F.col("EJECUTORA").cast("int"), F.col("SEC_EJEC").cast("int")).alias(
@@ -141,15 +138,60 @@ def build_dim_ejecutora(
         F.col("SEC_EJEC").cast("string").alias("EJECUTORA_NOMBRE"),
     ).filter(F.col("SEC_EJEC").isNotNull())
 
-    cats = categorias_df.select("SEC_EJEC", "CATEGORIA").dropDuplicates(["SEC_EJEC"])
-
-    return (
+    base = (
         from_ingreso.unionByName(from_esat, allowMissingColumns=True)
         .unionByName(from_resp, allowMissingColumns=True)
         .dropDuplicates(["SEC_EJEC"])
         .filter(F.col("EJECUTORA").isNotNull() & F.col("EJECUTORA_NOMBRE").isNotNull())
-        .join(cats, on="SEC_EJEC", how="left")
+    )
+
+    if municipios != "legacy":
+        # Lima=C / resto=G derivado de ingreso_df; dedup por nombre (menor SEC_EJEC = canónico)
+        cats = (
+            ingreso_df.select(
+                F.col("SEC_EJEC").cast("int"),
+                F.when(
+                    F.upper(F.trim(F.coalesce(F.col("DEPARTAMENTO_EJECUTORA_NOMBRE"), F.lit("")))) == "LIMA",
+                    F.lit("C"),
+                ).otherwise(F.lit("G")).alias("CATEGORIA"),
+            )
+            .filter(F.col("SEC_EJEC").isNotNull())
+            .dropDuplicates(["SEC_EJEC"])
+        )
+        full = (
+            base.join(cats, on="SEC_EJEC", how="left")
+            .withColumn("CATEGORIA", F.coalesce(F.col("CATEGORIA"), F.lit("G")))
+        )
+        return _dedup_by(full, ["EJECUTORA_NOMBRE"], "SEC_EJEC")
+
+    cats = categorias_df.select("SEC_EJEC", "CATEGORIA").dropDuplicates(["SEC_EJEC"])
+    return (
+        base.join(cats, on="SEC_EJEC", how="left")
         .withColumn("CATEGORIA", F.coalesce(F.col("CATEGORIA"), F.lit("")))
+    )
+
+
+def build_sec_ejec_bridge(ingreso_df: DataFrame) -> DataFrame:
+    """Puente SEC_EJEC → SEC_EJEC_CANON para el modo remap.
+
+    Por cada EJECUTORA_NOMBRE el canónico es el menor SEC_EJEC hallado en ingreso_df.
+    Todos los SEC_EJEC del mismo nombre apuntan al canónico; SEC_EJECs únicos se
+    mapean a sí mismos.
+    """
+    sec_name = (
+        ingreso_df.select(
+            F.col("SEC_EJEC").cast("int"),
+            F.col("EJECUTORA_NOMBRE").cast("string"),
+        )
+        .filter(F.col("SEC_EJEC").isNotNull() & F.col("EJECUTORA_NOMBRE").isNotNull())
+        .dropDuplicates(["SEC_EJEC"])
+    )
+    canonical = sec_name.groupBy("EJECUTORA_NOMBRE").agg(
+        F.min("SEC_EJEC").alias("SEC_EJEC_CANON")
+    )
+    return (
+        sec_name.join(canonical, on="EJECUTORA_NOMBRE", how="inner")
+        .select("SEC_EJEC", "SEC_EJEC_CANON")
     )
 
 
@@ -429,12 +471,15 @@ def build_dim_pregunta_renamu(renamu_dfs: list[DataFrame]) -> DataFrame:
         if not question_cols:
             continue
 
-        n = len(question_cols)
-        pairs = ", ".join(f"'{c}', CAST(`{c}` AS STRING)" for c in question_cols)
-        stack_expr = f"stack({n}, {pairs}) as (NOMBRE_CAMPO, VALOR)"
-
+        # stack() es Python UDTF en PySpark 4.x y crashea en Windows; usar array+explode
+        struct_cols = [
+            F.struct(F.lit(c).alias("NOMBRE_CAMPO"), F.col(c).cast("string").alias("VALOR"))
+            for c in question_cols
+        ]
         all_parts.append(
-            rdf.select(F.expr(stack_expr)).filter(F.col("NOMBRE_CAMPO").isNotNull())
+            rdf.select(F.explode(F.array(*struct_cols)).alias("_kv"))
+            .select(F.col("_kv.NOMBRE_CAMPO"), F.col("_kv.VALOR"))
+            .filter(F.col("NOMBRE_CAMPO").isNotNull())
         )
 
     if not all_parts:
@@ -476,7 +521,17 @@ def build_fact_ingreso(
     dim_tipo_recurso: DataFrame,
     dim_generica: DataFrame,
     dim_especifica: DataFrame,
+    sec_ejec_bridge: "DataFrame | None" = None,
 ) -> DataFrame:
+    # Modo remap: reasigna cada SEC_EJEC al canónico antes de unir con la dimensión
+    if sec_ejec_bridge is not None:
+        ingreso_df = (
+            ingreso_df
+            .join(F.broadcast(sec_ejec_bridge), on="SEC_EJEC", how="left")
+            .withColumn("SEC_EJEC", F.coalesce(F.col("SEC_EJEC_CANON"), F.col("SEC_EJEC")))
+            .drop("SEC_EJEC_CANON")
+        )
+
     # Deduplicar cada dimensión por clave natural antes de unir (igual que CTEs del SQL proc)
     nivel_d = _dedup_by(dim_nivel, ["NIVEL_GOBIERNO"], "IdNivelGobierno")
     sector_d = _dedup_by(dim_sector, ["SECTOR"], "IdSector")
@@ -572,11 +627,20 @@ def build_fact_formulario_sismepre(
     dim_anio: DataFrame,
     dim_formulario: DataFrame,
     dim_pregunta_sismepre: DataFrame,
+    sec_ejec_bridge: "DataFrame | None" = None,
 ) -> DataFrame:
     """
     dim_pregunta_sismepre debe ser el DataFrame leído de SQL Server
     (con IdPreguntaSismepre real como IDENTITY).
     """
+    if sec_ejec_bridge is not None:
+        respuestas_df = (
+            respuestas_df
+            .join(F.broadcast(sec_ejec_bridge), on="SEC_EJEC", how="left")
+            .withColumn("SEC_EJEC", F.coalesce(F.col("SEC_EJEC_CANON"), F.col("SEC_EJEC")))
+            .drop("SEC_EJEC_CANON")
+        )
+
     ejec_d = _dedup_by(dim_ejecutora, ["SEC_EJEC"], "IdEjecutora")
     anio_d = _dedup_by(dim_anio, ["ANO_APLICACION"], "IdAnioAplicacion")
     form_d = _dedup_by(dim_formulario, ["FORMULARIO_ID"], "IdFormSismepre")
@@ -744,12 +808,12 @@ def build_fact_renamu(
 # ── orquestadores ─────────────────────────────────────────────────────────────
 
 
-def build_dims(spark: SparkSession, stage: dict) -> dict[str, DataFrame]:
+def build_dims(spark: SparkSession, stage: dict, municipios: str = "legacy") -> dict[str, DataFrame]:
     """
     Construye todas las dimensiones EXCEPTO DIM_PREGUNTA_SISMEPRE,
     que requiere los IDs reales del servidor (la crea loader.create_and_load).
     """
-    _logger.info("Construyendo dimensiones del modelo estrella")
+    _logger.info(f"Construyendo dimensiones del modelo estrella (municipios={municipios})")
     ingreso = stage["ingreso_unified"]
     esat = stage["rentas_esat"]
     respuestas = stage["rentas_respuestas"]
@@ -760,7 +824,7 @@ def build_dims(spark: SparkSession, stage: dict) -> dict[str, DataFrame]:
 
     dims = {
         "DIM_TIEMPO": build_dim_tiempo(ingreso, ano_aplic, renamu_dfs),
-        "DIM_EJECUTORA": build_dim_ejecutora(ingreso, esat, respuestas, categorias),
+        "DIM_EJECUTORA": build_dim_ejecutora(ingreso, esat, respuestas, categorias, municipios=municipios),
         "DIM_UBIGEO": build_dim_ubigeo(ingreso, esat, renamu_dfs),
         "DIM_NIVEL_GOBIERNO": build_dim_nivel_gobierno(ingreso),
         "DIM_SECTOR": build_dim_sector(ingreso),
@@ -774,6 +838,10 @@ def build_dims(spark: SparkSession, stage: dict) -> dict[str, DataFrame]:
         "DIM_FORMULARIO_SISMEPRE": build_dim_formulario_sismepre(formulario),
         "DIM_PREGUNTA_RENAMU": build_dim_pregunta_renamu(renamu_dfs),
     }
+
+    if municipios == "remap":
+        dims["_SEC_EJEC_BRIDGE"] = build_sec_ejec_bridge(ingreso)
+        _logger.info("Puente SEC_EJEC -> canonico construido (modo remap)")
 
     _logger.info(f"Dimensiones construidas: {len(dims)} dimensiones")
     return dims
@@ -793,6 +861,9 @@ def build_facts(
     # DIM_PREGUNTA_SISMEPRE debe venir ya poblado en server_dims por loader.create_and_load
     dim_pregunta_sismepre = server_dims["DIM_PREGUNTA_SISMEPRE"]
 
+    # Puente canónico disponible solo en modo remap
+    bridge = server_dims.get("_SEC_EJEC_BRIDGE")
+
     facts = {
         "FACT_INGRESO": build_fact_ingreso(
             stage["ingreso_unified"],
@@ -805,6 +876,7 @@ def build_facts(
             server_dims["DIM_TIPO_RECURSO"],
             server_dims["DIM_GENERICA"],
             server_dims["DIM_ESPECIFICA"],
+            sec_ejec_bridge=bridge,
         ),
         "FACT_FORMULARIO_SISMEPRE": build_fact_formulario_sismepre(
             respuestas,
@@ -812,6 +884,7 @@ def build_facts(
             server_dims["DIM_ANIO_APLICACION"],
             server_dims["DIM_FORMULARIO_SISMEPRE"],
             dim_pregunta_sismepre,
+            sec_ejec_bridge=bridge,
         ),
         "FACT_RENAMU": build_fact_renamu(
             renamu_dfs,
@@ -822,3 +895,65 @@ def build_facts(
 
     _logger.info(f"Tablas de hechos construidas: {len(facts)} fact tables")
     return facts
+
+
+# ── surrogate keys ──────────────────────────────────────────────────────────
+
+_SURROGATE_KEY_CONFIG: dict[str, tuple[str, list[str]]] = {
+    "DIM_EJECUTORA": ("IdEjecutora", ["SEC_EJEC"]),
+    "DIM_UBIGEO": ("IdUbigeo", ["CODIGODEPARTAMENTO", "CODIGOPROVINCIA", "CODIGODISTRITO"]),
+    "DIM_NIVEL_GOBIERNO": ("IdNivelGobierno", ["NIVEL_GOBIERNO"]),
+    "DIM_SECTOR": ("IdSector", ["SECTOR"]),
+    "DIM_PLIEGO": ("IdPliego", ["PLIEGO"]),
+    "DIM_RUBRO": ("IdRubro", ["RUBRO"]),
+    "DIM_TIPO_RECURSO": ("IdTipoRecurso", ["TIPO_RECURSO"]),
+    "DIM_FUENTE_FINANCIAMIENTO": ("IdFuenteFinanciamiento", ["FUENTE_FINANCIAMIENTO"]),
+    "DIM_GENERICA": ("IdGenerica", ["GENERICA", "SUBGENERICA", "SUBGENERICA_DET"]),
+    "DIM_ESPECIFICA": ("IdEspecifica", ["ESPECIFICA", "ESPECIFICA_DET"]),
+    "DIM_ANIO_APLICACION": ("IdAnioAplicacion", ["ANO_APLICACION"]),
+    "DIM_FORMULARIO_SISMEPRE": ("IdFormSismepre", ["FORMULARIO_ID"]),
+    "DIM_PREGUNTA_RENAMU": ("IdPregunta", ["NOMBRE_CAMPO", "VALOR"]),
+}
+
+_SURROGATE_KEY_CONFIG_PREGUNTA_SISMEPRE = {
+    "DIM_PREGUNTA_SISMEPRE": ("IdPreguntaSismepre", ["IdFormSismepre", "PREGUNTA_ID"]),
+}
+
+
+def _add_surrogate_keys(dims: dict[str, DataFrame]) -> dict[str, DataFrame]:
+    for name, (key_col, order_cols) in _SURROGATE_KEY_CONFIG.items():
+        if name not in dims:
+            continue
+        df = dims[name]
+        if key_col in df.columns:
+            continue
+        w = Window.partitionBy(F.lit(0)).orderBy(*order_cols)
+        dims[name] = df.withColumn(key_col, F.row_number().over(w))
+    return dims
+
+
+# ── orquestador completo ────────────────────────────────────────────────────
+
+
+def build_all(
+    spark: SparkSession, stage: dict, municipios: str = "legacy"
+) -> tuple[dict[str, DataFrame], dict[str, DataFrame]]:
+    _logger.info(f"Construyendo dims + hechos para silver parquet (municipios={municipios})")
+    dims = build_dims(spark, stage, municipios=municipios)
+    dims = _add_surrogate_keys(dims)
+
+    if "DIM_FORMULARIO_SISMEPRE" in dims:
+        _logger.info("Construyendo DIM_PREGUNTA_SISMEPRE")
+        dim_preg = build_dim_pregunta_sismepre(
+            stage["rentas_preguntas"],
+            dims["DIM_FORMULARIO_SISMEPRE"],
+        )
+        sk = _SURROGATE_KEY_CONFIG_PREGUNTA_SISMEPRE["DIM_PREGUNTA_SISMEPRE"]
+        key_col, order_cols = sk
+        w = Window.partitionBy(F.lit(0)).orderBy(*order_cols)
+        dims["DIM_PREGUNTA_SISMEPRE"] = dim_preg.withColumn(key_col, F.row_number().over(w))
+    else:
+        _logger.warning("DIM_FORMULARIO_SISMEPRE no encontrada, omitiendo DIM_PREGUNTA_SISMEPRE")
+
+    facts = build_facts(spark, stage, dims)
+    return dims, facts

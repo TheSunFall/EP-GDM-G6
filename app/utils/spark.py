@@ -1,12 +1,7 @@
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
 from pyspark.sql import SparkSession
-
-load_dotenv(Path(__file__).parent.parent.parent / ".env")
-
-_LIB_DIR = Path(__file__).parent.parent.parent / "lib"
 
 # Requerido para Spark en Windows: hadoop.dll debe estar en PATH antes de que la JVM arranque
 if hadoop_home := os.environ.get("HADOOP_HOME"):
@@ -37,22 +32,17 @@ class SparkClient:
         os.environ.setdefault("PYSPARK_PYTHON", python_exec)
         os.environ.setdefault("PYSPARK_DRIVER_PYTHON", python_exec)
 
-        mssql_jar = str(_LIB_DIR / "mssql-jdbc-13.4.0.jre11.jar")
         hadoop_bin = str(Path(os.environ.get("HADOOP_HOME", "")) / "bin")
         self.spark = (
             SparkSession.builder.appName("Analisis_Presupuesto_MEF")
-            .config("spark.driver.memory", "8g")
+            .config("spark.driver.memory", "6g")
             .config("spark.sql.shuffle.partitions", "32")
-            .config("spark.jars", mssql_jar)
-            .config(
-                "spark.jars.packages", "com.microsoft.sqlserver:mssql-jdbc:13.4.0.jre11"
-            )
-            .config(
-                "spark.driver.extraJavaOptions", f"-Djava.library.path={hadoop_bin}"
-            )
-            .config(
-                "spark.executor.extraJavaOptions", f"-Djava.library.path={hadoop_bin}"
-            )
+            # Ruta de librerias nativas de Hadoop (winutils/hadoop.dll en Windows).
+            # Se usa extraLibraryPath en lugar de "-Djava.library.path" dentro de
+            # extraJavaOptions porque este ultimo elimina los backslashes de las
+            # rutas de Windows (D:\...\bin -> D:...bin) y la JVM no carga hadoop.dll.
+            .config("spark.driver.extraLibraryPath", hadoop_bin)
+            .config("spark.executor.extraLibraryPath", hadoop_bin)
             .config("spark.pyspark.python", python_exec)
             .getOrCreate()
         )
